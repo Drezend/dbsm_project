@@ -593,12 +593,16 @@ int MergeTwoSortedListsWithLimit(FILE* listFile, long left1Offset, long left1Cou
     void* data2 = NULL;                                // Second list node data  
     long current1 = left1Offset;                       // Current position in list 1
     long current2 = left2Offset;                       // Current position in list 2
+    long next1 = -1;                                   // Cached next offset for list 1
+    long next2 = -1;                                   // Cached next offset for list 2
     long count1 = 0;                                   // Nodes processed from list 1
     long count2 = 0;                                   // Nodes processed from list 2
     long mergedHead = -1;                              // Head of merged list
     long mergedTail = -1;                              // Tail of merged list
     int errorOccurred = 0;                             // Error flag
     int success = 0;                                   // Success flag
+    int data1Valid = 0;                                // Flag indicating data1 has valid data
+    int data2Valid = 0;                                // Flag indicating data2 has valid data
     
     // Allocate buffers
     data1 = malloc(recordSize);
@@ -607,53 +611,113 @@ int MergeTwoSortedListsWithLimit(FILE* listFile, long left1Offset, long left1Cou
         errorOccurred = 1;
     }
     
-    // Merge with limits
+    // Pre-read first node from each list if available
+    if (errorOccurred == 0 && count1 < left1Count && current1 != -1) {
+        if (ReadNodeFromList(listFile, current1, data1, &node1Header) == 1) {
+            next1 = node1Header.nextOffset;
+            data1Valid = 1;
+        } else {
+            errorOccurred = 1;
+        }
+    }
+    
+    if (errorOccurred == 0 && count2 < left2Count && current2 != -1) {
+        if (ReadNodeFromList(listFile, current2, data2, &node2Header) == 1) {
+            next2 = node2Header.nextOffset;
+            data2Valid = 1;
+        } else {
+            errorOccurred = 1;
+        }
+    }
+    
+    // Merge with limits - no re-reading needed
     while (errorOccurred == 0 && (count1 < left1Count || count2 < left2Count)) {
         int takeFrom1 = 0;                             // Flag to take from list 1
         long selectedOffset = -1;                      // Selected node offset
+        DoublyLinkedNodeHeader selectedHeader;         // Selected node header
         
-        // Decide which list to take from
-        if (count1 >= left1Count) {
+        // Decide which list to take from based on cached data
+        if (count1 >= left1Count || data1Valid == 0) {
             takeFrom1 = 0;                             // List 1 exhausted
-        } else if (count2 >= left2Count) {
+        } else if (count2 >= left2Count || data2Valid == 0) {
             takeFrom1 = 1;                             // List 2 exhausted
         } else {
-            // Compare both lists
-            if (ReadNodeFromList(listFile, current1, data1, &node1Header) == 1 &&
-                ReadNodeFromList(listFile, current2, data2, &node2Header) == 1) {
-                takeFrom1 = (compareFunction(data1, data2) <= 0) ? 1 : 0;
-            } else {
-                errorOccurred = 1;
-            }
+            // Compare using already-loaded data
+            takeFrom1 = (compareFunction(data1, data2) <= 0) ? 1 : 0;
         }
         
-        // Take node (no re-read needed, we already have the headers from comparison above)
+        // Take node and cache next offset (no re-read)
         if (errorOccurred == 0) {
             if (takeFrom1 == 1) {
                 selectedOffset = current1;
-                current1 = node1Header.nextOffset;     // Already have header from comparison
+                selectedHeader = node1Header;
+                current1 = next1;                      // Use cached next offset
                 count1++;
+                data1Valid = 0;                        // Mark data1 as consumed
+                
+                // Read next node from list 1 if more remain
+                if (count1 < left1Count && current1 != -1) {
+                    if (ReadNodeFromList(listFile, current1, data1, &node1Header) == 1) {
+                        next1 = node1Header.nextOffset;
+                        data1Valid = 1;
+                    } else {
+                        errorOccurred = 1;
+                    }
+                }
             } else {
                 selectedOffset = current2;
-                current2 = node2Header.nextOffset;     // Already have header from comparison
+                selectedHeader = node2Header;
+                current2 = next2;                      // Use cached next offset
                 count2++;
+                data2Valid = 0;                        // Mark data2 as consumed
+                
+                // Read next node from list 2 if more remain
+                if (count2 < left2Count && current2 != -1) {
+                    if (ReadNodeFromList(listFile, current2, data2, &node2Header) == 1) {
+                        next2 = node2Header.nextOffset;
+                        data2Valid = 1;
+                    } else {
+                        errorOccurred = 1;
+                    }
+                }
             }
             
-            // Append to merged list
+            // Append selected node to merged list
             if (errorOccurred == 0 && selectedOffset != -1) {
                 if (mergedHead == -1) {
+                    // First node in merged list
                     mergedHead = selectedOffset;
                     mergedTail = selectedOffset;
+                    
+                    // Update selected node's prev to -1 (it's now the head)
+                    selectedHeader.prevOffset = -1;
+                    selectedHeader.nextOffset = -1;    // Will be updated when next node is added
+                    if (WriteNodeToList(listFile, selectedOffset, NULL, &selectedHeader) != 1) {
+                        errorOccurred = 1;
+                    }
                 } else {
-                    // Link nodes - now WriteNodeToList supports NULL dataBuffer for header-only updates
-                    DoublyLinkedNodeHeader tailHeader, selectedHeader;
-                    if (ReadNodeFromList(listFile, mergedTail, NULL, &tailHeader) == 1 &&
-                        ReadNodeFromList(listFile, selectedOffset, NULL, &selectedHeader) == 1) {
+                    // Link to previous tail - batch pointer updates
+                    DoublyLinkedNodeHeader tailHeader;
+                    
+                    // Read current tail header
+                    if (ReadNodeFromList(listFile, mergedTail, NULL, &tailHeader) == 1) {
+                        // Update tail to point to new node
                         tailHeader.nextOffset = selectedOffset;
+                        
+                        // Update selected node to point back to tail
                         selectedHeader.prevOffset = mergedTail;
-                        WriteNodeToList(listFile, mergedTail, NULL, &tailHeader);
-                        WriteNodeToList(listFile, selectedOffset, NULL, &selectedHeader);
-                        mergedTail = selectedOffset;
+                        selectedHeader.nextOffset = -1;
+                        
+                        // Write both updates (grouped writes for better I/O)
+                        if (WriteNodeToList(listFile, mergedTail, NULL, &tailHeader) == 1) {
+                            if (WriteNodeToList(listFile, selectedOffset, NULL, &selectedHeader) == 1) {
+                                mergedTail = selectedOffset;
+                            } else {
+                                errorOccurred = 1;
+                            }
+                        } else {
+                            errorOccurred = 1;
+                        }
                     } else {
                         errorOccurred = 1;
                     }
@@ -888,14 +952,15 @@ int MergeTwoSortedLists(FILE* listFile, long left1Offset, long left2Offset,
  *            sortedTailOffset - pointer to store sorted segment tail
  * Returns: int - 1 on success, 0 on failure
  * Note: Bottom-up approach with O(n log n) complexity, no stack overflow risk
+ *       Optimized to minimize I/O: avoids repeated traversals, caches offsets
  */
 int MergeSortLinkedListIterative(FILE* listFile, long headOffset, long nodeCount,
                                   size_t recordSize, int (*compareFunction)(const void*, const void*),
                                   long* sortedHeadOffset, long* sortedTailOffset) {
     DoublyLinkedNodeHeader nodeHeader;                 // Node header buffer
-    long currentHead = headOffset;                     // Current list head
+    long currentHead = headOffset;                     // Current list head (cached)
+    long currentTail = -1;                             // Current list tail (cached)
     long sublistSize = 1;                              // Size of sublists to merge
-    long numMerges = 0;                                // Number of merges performed
     int errorOccurred = 0;                             // Error flag
     int success = 0;                                   // Success flag
     
@@ -910,17 +975,43 @@ int MergeSortLinkedListIterative(FILE* listFile, long headOffset, long nodeCount
     // Base case: empty or single node
     if (nodeCount <= 1) {
         success = 1;
+        if (sortedTailOffset != NULL && nodeCount == 1) {
+            *sortedTailOffset = headOffset;
+        }
     } else {
         int maxIterations = 64;                        // Prevent infinite loops (log2 of huge number)
         int iteration = 0;                             // Current iteration count
+        
+        // Find tail initially (one-time traversal, then cached)
+        if (errorOccurred == 0) {
+            long tempPos = headOffset;
+            currentTail = headOffset;
+            int foundEnd = 0;
+            
+            while (tempPos != -1 && foundEnd == 0) {
+                if (ReadNodeFromList(listFile, tempPos, NULL, &nodeHeader) == 1) {
+                    currentTail = tempPos;
+                    if (nodeHeader.nextOffset == -1) {
+                        foundEnd = 1;
+                    } else {
+                        tempPos = nodeHeader.nextOffset;
+                    }
+                } else {
+                    errorOccurred = 1;
+                    foundEnd = 1;
+                }
+            }
+        }
         
         // Bottom-up merge sort: start with sublist size 1, double each iteration
         while (sublistSize < nodeCount && errorOccurred == 0 && iteration < maxIterations) {
             long mergedListHead = -1;                  // Head of new merged list
             long mergedListTail = -1;                  // Tail of new merged list
             long currentPos = currentHead;             // Current position in old list
-            numMerges = 0;
+            long numMerges = 0;                        // Number of merges performed
             iteration++;
+            
+            printf("Merge sort iteration %d: sublist size %ld\n", iteration, sublistSize);
             
             // Merge pairs of sublists
             while (currentPos != -1 && errorOccurred == 0) {
@@ -932,9 +1023,9 @@ int MergeSortLinkedListIterative(FILE* listFile, long headOffset, long nodeCount
                 long mergedHead = -1;                  // Head of merged pair
                 long mergedTail = -1;                  // Tail of merged pair
                 
-                // Find start of second sublist (skip sublistSize nodes from left1Start)
+                // Skip sublistSize nodes to find start of second sublist (optimized counting)
                 left2Start = left1Start;
-                while (left1Count < sublistSize && left2Start != -1) {
+                while (left1Count < sublistSize && left2Start != -1 && errorOccurred == 0) {
                     if (ReadNodeFromList(listFile, left2Start, NULL, &nodeHeader) == 1) {
                         left2Start = nodeHeader.nextOffset;
                         left1Count++;
@@ -943,10 +1034,35 @@ int MergeSortLinkedListIterative(FILE* listFile, long headOffset, long nodeCount
                     }
                 }
                 
-                // Find start of next pair (skip another sublistSize nodes)
-                if (left2Start != -1) {
+                // If no second sublist, first sublist goes to end (count actual nodes)
+                if (left2Start == -1) {
+                    // Remaining nodes form a single sublist - append it to merged list
+                    mergedHead = left1Start;
+                    
+                    // Find actual tail of this sublist
+                    long tempPos = left1Start;
+                    mergedTail = left1Start;
+                    int foundEnd = 0;
+                    
+                    while (tempPos != -1 && foundEnd == 0) {
+                        if (ReadNodeFromList(listFile, tempPos, NULL, &nodeHeader) == 1) {
+                            mergedTail = tempPos;
+                            if (nodeHeader.nextOffset == -1) {
+                                foundEnd = 1;
+                            } else {
+                                tempPos = nodeHeader.nextOffset;
+                            }
+                        } else {
+                            errorOccurred = 1;
+                            foundEnd = 1;
+                        }
+                    }
+                    
+                    nextPairStart = -1;                // No more pairs
+                } else {
+                    // Find start of next pair (skip another sublistSize nodes from left2Start)
                     nextPairStart = left2Start;
-                    while (left2Count < sublistSize && nextPairStart != -1) {
+                    while (left2Count < sublistSize && nextPairStart != -1 && errorOccurred == 0) {
                         if (ReadNodeFromList(listFile, nextPairStart, NULL, &nodeHeader) == 1) {
                             nextPairStart = nodeHeader.nextOffset;
                             left2Count++;
@@ -954,78 +1070,61 @@ int MergeSortLinkedListIterative(FILE* listFile, long headOffset, long nodeCount
                             errorOccurred = 1;
                         }
                     }
-                }
-                
-                // Merge the two sublists
-                if (left2Start == -1) {
-                    // No second sublist, just append first sublist
-                    mergedHead = left1Start;
-                    mergedTail = left1Start;
                     
-                    // Find the actual tail of left1 (traverse until count or -1)
-                    long tempPos = left1Start;
-                    long countNodes = 1;               // Started at left1Start already
-                    int foundTail = 0;                 // Flag for exit condition
-                    
-                    while (countNodes < left1Count && errorOccurred == 0 && foundTail == 0) {
-                        if (ReadNodeFromList(listFile, tempPos, NULL, &nodeHeader) == 1) {
-                            if (nodeHeader.nextOffset == -1 || nodeHeader.nextOffset == nextPairStart) {
-                                mergedTail = tempPos;
-                                foundTail = 1;         // Exit condition
-                            } else {
-                                mergedTail = tempPos;
-                                tempPos = nodeHeader.nextOffset;
-                                countNodes++;
-                            }
-                        } else {
-                            errorOccurred = 1;
-                        }
-                    }
-                } else {
-                    // Merge two sublists
+                    // Merge the two sublists
                     if (MergeTwoSortedListsWithLimit(listFile, left1Start, left1Count, left2Start, left2Count,
                                                      recordSize, compareFunction, &mergedHead, &mergedTail) == 0) {
                         errorOccurred = 1;
                     }
                 }
                 
-                // Append merged pair to result list
-                if (errorOccurred == 0) {
+                // Append merged pair to result list (avoid traversals - use cached tail)
+                if (errorOccurred == 0 && mergedHead != -1) {
                     if (mergedListHead == -1) {
+                        // First merged segment
                         mergedListHead = mergedHead;
                         mergedListTail = mergedTail;
                     } else {
-                        // Link previous tail to new head
-                        if (ReadNodeFromList(listFile, mergedListTail, NULL, &nodeHeader) == 1) {
-                            nodeHeader.nextOffset = mergedHead;
-                            if (WriteNodeToList(listFile, mergedListTail, NULL, &nodeHeader) == 1) {
-                                // Link new head back to previous tail
-                                if (ReadNodeFromList(listFile, mergedHead, NULL, &nodeHeader) == 1) {
-                                    nodeHeader.prevOffset = mergedListTail;
-                                    WriteNodeToList(listFile, mergedHead, NULL, &nodeHeader);
-                                }
+                        // Link previous tail to new head (batched pointer updates)
+                        DoublyLinkedNodeHeader tailHeader, headHeader;
+                        
+                        if (ReadNodeFromList(listFile, mergedListTail, NULL, &tailHeader) == 1 &&
+                            ReadNodeFromList(listFile, mergedHead, NULL, &headHeader) == 1) {
+                            
+                            tailHeader.nextOffset = mergedHead;
+                            headHeader.prevOffset = mergedListTail;
+                            
+                            // Write both updates together
+                            if (WriteNodeToList(listFile, mergedListTail, NULL, &tailHeader) == 1 &&
+                                WriteNodeToList(listFile, mergedHead, NULL, &headHeader) == 1) {
                                 mergedListTail = mergedTail;
+                            } else {
+                                errorOccurred = 1;
                             }
+                        } else {
+                            errorOccurred = 1;
                         }
                     }
                     numMerges++;
                 }
                 
-                // Move to next pair
+                // Move to next pair (no traversal needed - we cached it)
                 currentPos = nextPairStart;
             }
             
-            // Update for next iteration
-            currentHead = mergedListHead;
-            sublistSize *= 2;
-            
-            // Print progress and check for stalls
-            if (numMerges > 0) {
-                printf("Merge sort progress: sublist size %ld, merges %ld\n", sublistSize / 2, numMerges);
-            } else {
-                // If no merges were performed, something is wrong
-                printf("ERROR: No merges performed in iteration %d\n", iteration);
-                errorOccurred = 1;
+            // Update for next iteration (cache head and tail)
+            if (errorOccurred == 0) {
+                currentHead = mergedListHead;
+                currentTail = mergedListTail;
+                sublistSize *= 2;
+                
+                printf("  Completed %ld merges, new sublist size: %ld\n", numMerges, sublistSize);
+                
+                // Safety check: if no merges performed, something is wrong
+                if (numMerges == 0) {
+                    printf("ERROR: No merges performed in iteration %d\n", iteration);
+                    errorOccurred = 1;
+                }
             }
         }
         
@@ -1035,21 +1134,13 @@ int MergeSortLinkedListIterative(FILE* listFile, long headOffset, long nodeCount
             errorOccurred = 1;
         }
         
-        // Set output
+        // Set output (using cached values - no traversal needed)
         if (errorOccurred == 0) {
             if (sortedHeadOffset != NULL) {
                 *sortedHeadOffset = currentHead;
             }
             if (sortedTailOffset != NULL) {
-                // Find tail
-                long tailPos = currentHead;
-                while (tailPos != -1 && ReadNodeFromList(listFile, tailPos, NULL, &nodeHeader) == 1) {
-                    if (nodeHeader.nextOffset == -1) {
-                        *sortedTailOffset = tailPos;
-                        break;
-                    }
-                    tailPos = nodeHeader.nextOffset;
-                }
+                *sortedTailOffset = currentTail;
             }
             success = 1;
         }
@@ -2325,119 +2416,46 @@ int SortBubble(const char* inputFileName, const char* outputFileName, size_t rec
             
             // Inner loop: traverse list and compare adjacent nodes
             for (innerIndex = 0; innerIndex < metadata.nodeCount - outerIndex - 1 && errorOccurred == 0; innerIndex++) {
-                // Read current node header
+                // Read current node header and data
                 if (fseek(listFile, currentOffset, SEEK_SET) == 0) {
                     if (fread(&node1Header, sizeof(DoublyLinkedNodeHeader), 1, listFile) == 1) {
-                        // Read current node data
                         if (fread(data1, recordSize, 1, listFile) == 1) {
                             nextOffset = node1Header.nextOffset;
                             
-                            // Read next node (if exists)
+                            // Read next node header and data (if exists)
                             if (nextOffset != -1) {
                                 if (fseek(listFile, nextOffset, SEEK_SET) == 0) {
                                     if (fread(&node2Header, sizeof(DoublyLinkedNodeHeader), 1, listFile) == 1) {
-                                        // Read next node data
                                         if (fread(data2, recordSize, 1, listFile) == 1) {
                                             // Compare the two nodes
                                             comparisonResult = compareFunction(data1, data2);
                                             
-                                            // If out of order, swap POINTERS (not data)
+                                            // If out of order, swap ONLY DATA (keep pointers unchanged)
+                                            // This is simpler, more efficient, and correct for bubble sort
                                             if (comparisonResult > 0) {
-                                                DoublyLinkedNodeHeader prevHeader;
-                                                DoublyLinkedNodeHeader nextNextHeader;
-                                                long prevOffset = node1Header.prevOffset;
-                                                long nextNextOffset = node2Header.nextOffset;
-                                                
-                                                // Update external pointers (previous node points to node2)
-                                                if (prevOffset != -1) {
-                                                    if (fseek(listFile, prevOffset, SEEK_SET) == 0) {
-                                                        if (fread(&prevHeader, sizeof(DoublyLinkedNodeHeader), 1, listFile) == 1) {
-                                                            prevHeader.nextOffset = nextOffset;
-                                                            if (fseek(listFile, prevOffset, SEEK_SET) == 0) {
-                                                                if (fwrite(&prevHeader, sizeof(DoublyLinkedNodeHeader), 1, listFile) != 1) {
-                                                                    errorOccurred = 1;
-                                                                }
+                                                // Write data2 to currentOffset (node1's position)
+                                                if (fseek(listFile, currentOffset + sizeof(DoublyLinkedNodeHeader), SEEK_SET) == 0) {
+                                                    if (fwrite(data2, recordSize, 1, listFile) == 1) {
+                                                        // Write data1 to nextOffset (node2's position)
+                                                        if (fseek(listFile, nextOffset + sizeof(DoublyLinkedNodeHeader), SEEK_SET) == 0) {
+                                                            if (fwrite(data1, recordSize, 1, listFile) == 1) {
+                                                                swapOccurred = 1;  // Mark that swap occurred
                                                             } else {
                                                                 errorOccurred = 1;
                                                             }
                                                         } else {
                                                             errorOccurred = 1;
                                                         }
-                                                    } else {
-                                                        errorOccurred = 1;
-                                                    }
-                                                } else {
-                                                    // node1 was head, now node2 is head
-                                                    metadata.headOffset = nextOffset;
-                                                }
-                                                
-                                                // Update external pointers (nextNext node points back to node1)
-                                                if (nextNextOffset != -1 && errorOccurred == 0) {
-                                                    if (fseek(listFile, nextNextOffset, SEEK_SET) == 0) {
-                                                        if (fread(&nextNextHeader, sizeof(DoublyLinkedNodeHeader), 1, listFile) == 1) {
-                                                            nextNextHeader.prevOffset = currentOffset;
-                                                            if (fseek(listFile, nextNextOffset, SEEK_SET) == 0) {
-                                                                if (fwrite(&nextNextHeader, sizeof(DoublyLinkedNodeHeader), 1, listFile) != 1) {
-                                                                    errorOccurred = 1;
-                                                                }
-                                                            } else {
-                                                                errorOccurred = 1;
-                                                            }
-                                                        } else {
-                                                            errorOccurred = 1;
-                                                        }
-                                                    } else {
-                                                        errorOccurred = 1;
-                                                    }
-                                                }
-                                                
-                                                // Update internal pointers (swap node1 and node2)
-                                                if (errorOccurred == 0) {
-                                                    node1Header.nextOffset = nextNextOffset;
-                                                    node1Header.prevOffset = nextOffset;
-                                                    node2Header.nextOffset = currentOffset;
-                                                    node2Header.prevOffset = prevOffset;
-                                                    
-                                                    // Write updated node1 header
-                                                    if (fseek(listFile, currentOffset, SEEK_SET) == 0) {
-                                                        if (fwrite(&node1Header, sizeof(DoublyLinkedNodeHeader), 1, listFile) == 1) {
-                                                            // Write updated node2 header
-                                                            if (fseek(listFile, nextOffset, SEEK_SET) == 0) {
-                                                                if (fwrite(&node2Header, sizeof(DoublyLinkedNodeHeader), 1, listFile) == 1) {
-                                                                    swapOccurred = 1;  // Mark that swap occurred
-                                                                } else {
-                                                                    errorOccurred = 1;
-                                                                }
-                                                            } else {
-                                                                errorOccurred = 1;
-                                                            }
-                                                        } else {
-                                                            errorOccurred = 1;
-                                                        }
-                                                    } else {
-                                                        errorOccurred = 1;
-                                                    }
-                                                }
-                                            }
-                                            
-                                            // Move to next node in logical order
-                                            // After a swap, the pointers have changed, so we need to re-read
-                                            // the node header at currentOffset to get updated nextOffset
-                                            if (comparisonResult > 0 && errorOccurred == 0) {
-                                                // After swap, re-read node at currentOffset to get new nextOffset
-                                                if (fseek(listFile, currentOffset, SEEK_SET) == 0) {
-                                                    if (fread(&node1Header, sizeof(DoublyLinkedNodeHeader), 1, listFile) == 1) {
-                                                        currentOffset = node1Header.nextOffset;
                                                     } else {
                                                         errorOccurred = 1;
                                                     }
                                                 } else {
                                                     errorOccurred = 1;
                                                 }
-                                            } else if (comparisonResult <= 0) {
-                                                // No swap, simply advance to next
-                                                currentOffset = nextOffset;
                                             }
+                                            
+                                            // Move to next node (simply advance, no re-read needed)
+                                            currentOffset = nextOffset;
                                         } else {
                                             errorOccurred = 1;
                                         }
@@ -2462,17 +2480,6 @@ int SortBubble(const char* inputFileName, const char* outputFileName, size_t rec
             // If no swaps occurred, list is sorted (early termination without break)
             if (swapOccurred == 0) {
                 sortComplete = 1;
-            }
-            
-            // Update metadata with potentially changed headOffset
-            if (errorOccurred == 0 && swapOccurred == 1) {
-                if (fseek(listFile, 0, SEEK_SET) == 0) {
-                    if (fwrite(&metadata, sizeof(LinkedListFileMetadata), 1, listFile) != 1) {
-                        errorOccurred = 1;
-                    }
-                } else {
-                    errorOccurred = 1;
-                }
             }
         }
     }
