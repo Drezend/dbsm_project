@@ -1,5 +1,5 @@
 /*
- * Publication Date: October 4, 2025
+ * Publication Date: November 16, 2025
  * Time: 20:32
  * Version: 1.0.0
  * Author: Ing(c) Andres David Rincon Salazar
@@ -31,7 +31,7 @@
 #include <math.h>          // Mathematical functions (abs, etc.)
 #include <windows.h>       // Windows-specific functions (console UTF-8 support)
 #include <stdarg.h>        // Variable argument list support for variadic functions
-#include "structures.c"    // Custom data structures for database tables
+#include "structures.h"    // Custom data structures for database tables
 
 // Function prototypes for sorting algorithms
 int SortBubble(const char* inputFileName, const char* outputFileName, size_t recordSize, 
@@ -55,6 +55,7 @@ int ParseExchangeRateDate(const char* dateString, dateStructure* parsedDate);
 // Function prototypes for report generation
 void GenerateReport2ProductTypesAndLocations(const char* sortType);
 void GenerateReport5CustomerSalesListing(const char* sortType);
+void GenerateReport3SeasonalPatterns(const char* sortType);
 void WriteToReport(FILE* txtFile, const char* format, ...);
 void GenerateReportHeader(FILE* txtFile, const char* reportTitle);
 void GenerateReportFooter(FILE* txtFile, time_t startTime);
@@ -1219,11 +1220,6 @@ int CompareDates(const dateStructure* date1, const dateStructure* date2) {
  * Returns: int - comparison result for ProductName + Continent + Country + State + City
  * Note: Used for "What types of products does the company sell, and where are customers located?"
  */
-typedef struct {
-    productRecord product;                             // Product information
-    customerRecord customer;                           // Customer information
-} productCustomerRecord;
-
 int CompareProductsForReport2(const void* record1, const void* record2) {
     const productCustomerRecord* pc1 = (const productCustomerRecord*)record1;  // First combined record
     const productCustomerRecord* pc2 = (const productCustomerRecord*)record2;  // Second combined record
@@ -1263,11 +1259,6 @@ int CompareProductsForReport2(const void* record1, const void* record2) {
  * Returns: int - comparison result for Customer Name + Order Date + ProductKey
  * Note: Used for "List of sales order by Customer Name + Order Date + ProductKey"
  */
-typedef struct {
-    salesRecord sale;                                  // Sales information
-    customerRecord customer;                           // Customer information
-} salesCustomerRecord;
-
 int CompareSalesForReport5(const void* record1, const void* record2) {
     const salesCustomerRecord* sc1 = (const salesCustomerRecord*)record1;     // First combined record
     const salesCustomerRecord* sc2 = (const salesCustomerRecord*)record2;     // Second combined record
@@ -1320,6 +1311,30 @@ int CompareSalesForDeliveryAnalysis(const void* record1, const void* record2) {
     // Compare by Order Date for delivery time analysis over time
     return CompareDates(&sale1->orderDate, &sale2->orderDate);
 }//end function definition CompareSalesForDeliveryAnalysis
+
+/*
+ * Function: CompareMonthlySalesData
+ * Purpose: Compares two monthlySalesData records for chronological sorting
+ * Parameters: record1 - pointer to first monthlySalesData
+ *            record2 - pointer to second monthlySalesData
+ * Returns: int - comparison result for Year + Month
+ * Note: Used for sorting monthly aggregated data chronologically
+ */
+int CompareMonthlySalesData(const void* record1, const void* record2) {
+    const monthlySalesData* data1 = (const monthlySalesData*)record1;
+    const monthlySalesData* data2 = (const monthlySalesData*)record2;
+    int result = 0;
+    
+    // Compare by year first
+    result = (int)data1->year - (int)data2->year;
+    
+    // If years equal, compare by month
+    if (result == 0) {
+        result = (int)data1->month - (int)data2->month;
+    }
+    
+    return result;
+}//end function definition CompareMonthlySalesData
 
 /*
  * Function: CompareStoresByCountry
@@ -1570,6 +1585,926 @@ double ConvertCurrencyToUSD(double amount, const char* currencyCode, const dateS
     return convertedAmount;                            // Single return point
 }//end function definition ConvertCurrencyToUSD
 
+/*
+ * Function: AggregateSalesByMonth
+ * Purpose: Aggregates sales data by month from SalesTable using file-based processing
+ * Parameters: outputFileName - name of file to store monthly aggregated data
+ * Returns: int - number of months processed, -1 on error
+ * Note: Processes sales file line-by-line without loading all data into memory
+ *       Calculates order counts and revenue per month
+ *       Uses temporary file for aggregation to comply with memory restrictions
+ */
+int AggregateSalesByMonth(const char* outputFileName) {
+    FILE* salesFile = NULL;                            // Sales table file
+    FILE* productsFile = NULL;                         // Products table file
+    FILE* monthlyFile = NULL;                          // Monthly aggregated data file
+    salesRecord currentSale;                           // Current sales record
+    productRecord currentProduct;                      // Current product record
+    monthlySalesData monthlyData[100];                 // Array for monthly data (max 100 months)
+    int monthCount = 0;                                // Number of unique months
+    int recordsProcessed = 0;                          // Records processed counter
+    int errorOccurred = 0;                             // Error flag
+    int returnValue = -1;                              // Return value
+    int productFound = 0;                              // Product found flag
+    double lineRevenue = 0.0;                          // Revenue for current line
+    
+    // Initialize monthly data array
+    for (int i = 0; i < 100; i++) {
+        InitializeStructureToZero(&monthlyData[i], sizeof(monthlySalesData));
+    }
+    
+    // Open sales file
+    salesFile = OpenFileWithErrorCheck("SalesTable.dat", "rb");
+    if (salesFile == NULL) {
+        printf("Error: Cannot open SalesTable.dat\n");
+        errorOccurred = 1;
+        returnValue = -1;
+    }
+    
+    // Open products file for price lookup
+    if (errorOccurred == 0) {
+        productsFile = OpenFileWithErrorCheck("ProductsTable.dat", "rb");
+        if (productsFile == NULL) {
+            printf("Error: Cannot open ProductsTable.dat\n");
+            errorOccurred = 1;
+            returnValue = -1;
+        }
+    }
+    
+    if (errorOccurred == 0) {
+        printf("Aggregating sales data by month...\n");
+        
+        // Process each sales record
+        while (fread(&currentSale, sizeof(salesRecord), 1, salesFile) == 1 && errorOccurred == 0) {
+            recordsProcessed++;
+            
+            // Find the month index in our array
+            int monthIndex = -1;
+            int foundMonth = 0;
+            
+            for (int i = 0; i < monthCount && foundMonth == 0; i++) {
+                if (monthlyData[i].year == currentSale.orderDate.yearValue &&
+                    monthlyData[i].month == currentSale.orderDate.monthOfYear) {
+                    monthIndex = i;
+                    foundMonth = 1;
+                }
+            }
+            
+            // If month not found, create new entry
+            if (foundMonth == 0 && monthCount < 100) {
+                monthIndex = monthCount;
+                monthlyData[monthIndex].year = currentSale.orderDate.yearValue;
+                monthlyData[monthIndex].month = currentSale.orderDate.monthOfYear;
+                monthlyData[monthIndex].orderCount = 0;
+                monthlyData[monthIndex].totalRevenue = 0.0;
+                monthCount++;
+            }
+            
+            // If we found or created a valid month entry
+            if (monthIndex >= 0 && monthIndex < 100) {
+                // Increment order count (one order = one sale record)
+                monthlyData[monthIndex].orderCount++;
+                
+                // Find product to get price
+                productFound = 0;
+                rewind(productsFile);
+                
+                while (fread(&currentProduct, sizeof(productRecord), 1, productsFile) == 1 && productFound == 0) {
+                    if (currentProduct.productKey == currentSale.productKey) {
+                        // Calculate revenue: price * quantity
+                        lineRevenue = currentProduct.unitPriceUSD * (double)currentSale.quantity;
+                        lineRevenue = RoundToThirdDecimal(lineRevenue);
+                        monthlyData[monthIndex].totalRevenue += lineRevenue;
+                        productFound = 1;
+                    }
+                }
+            }
+        }
+        
+        printf("Processed %d sales records into %d months\n", recordsProcessed, monthCount);
+    }
+    
+    // Close input files
+    if (salesFile != NULL) fclose(salesFile);
+    if (productsFile != NULL) fclose(productsFile);
+    
+    // Write aggregated data to file
+    if (errorOccurred == 0 && monthCount > 0) {
+        monthlyFile = OpenFileWithErrorCheck(outputFileName, "wb");
+        if (monthlyFile == NULL) {
+            printf("Error: Cannot create monthly data file\n");
+            errorOccurred = 1;
+            returnValue = -1;
+        } else {
+            // Write all monthly records
+            for (int i = 0; i < monthCount; i++) {
+                if (fwrite(&monthlyData[i], sizeof(monthlySalesData), 1, monthlyFile) != 1) {
+                    printf("Error: Failed to write monthly data record %d\n", i);
+                    errorOccurred = 1;
+                    returnValue = -1;
+                }
+            }
+            
+            fclose(monthlyFile);
+            
+            if (errorOccurred == 0) {
+                returnValue = monthCount;
+            }
+        }
+    }
+    
+    return returnValue;                                // Single return point
+}//end function definition AggregateSalesByMonth
+
+/*
+ * Function: DrawASCIIBarChart
+ * Purpose: Generates ASCII bar chart for visualizing monthly data
+ * Parameters: txtFile - output file pointer (NULL to write only to console)
+ *            monthlyData - array of monthly sales data
+ *            dataCount - number of months in the array
+ *            chartType - 'O' for orders, 'R' for revenue
+ * Returns: void
+ * Note: Creates horizontal bar chart with appropriate scaling
+ *       Complies with single return requirement
+ */
+void DrawASCIIBarChart(FILE* txtFile, const monthlySalesData* monthlyData, int dataCount, char chartType) {
+    unsigned long maxOrders = 0;                       // Maximum order count
+    double maxRevenue = 0.0;                           // Maximum revenue
+    int maxBarLength = 60;                             // Maximum bar length in characters
+    double scaleFactor = 0.0;                          // Scale factor for bars
+    const char* chartTitle = NULL;                     // Chart title
+    
+    if (dataCount <= 0) {
+        WriteToReport(txtFile, "No data to display\n");
+        return;
+    }
+    
+    // Set titles based on chart type
+    if (chartType == 'O') {
+        chartTitle = "Monthly Order Volume";
+    } else {
+        chartTitle = "Monthly Revenue";
+    }
+    
+    // Find maximum value for scaling
+    for (int i = 0; i < dataCount; i++) {
+        if (chartType == 'O') {
+            if (monthlyData[i].orderCount > maxOrders) {
+                maxOrders = monthlyData[i].orderCount;
+            }
+        } else {
+            if (monthlyData[i].totalRevenue > maxRevenue) {
+                maxRevenue = monthlyData[i].totalRevenue;
+            }
+        }
+    }
+    
+    // Calculate scale factor
+    if (chartType == 'O') {
+        scaleFactor = (maxOrders > 0) ? (double)maxBarLength / (double)maxOrders : 0.0;
+    } else {
+        scaleFactor = (maxRevenue > 0.0) ? (double)maxBarLength / maxRevenue : 0.0;
+    }
+    
+    // Draw chart header
+    WriteToReport(txtFile, "\n%s\n", chartTitle);
+    WriteToReport(txtFile, "========================================\n");
+    
+    // Draw bars for each month
+    for (int i = 0; i < dataCount; i++) {
+        int barLength = 0;                             // Length of bar for this month
+        
+        // Calculate bar length
+        if (chartType == 'O') {
+            barLength = (int)(monthlyData[i].orderCount * scaleFactor);
+        } else {
+            barLength = (int)(monthlyData[i].totalRevenue * scaleFactor);
+        }
+        
+        // Ensure at least 1 character if value > 0
+        if (barLength == 0 && 
+            ((chartType == 'O' && monthlyData[i].orderCount > 0) ||
+             (chartType == 'R' && monthlyData[i].totalRevenue > 0.0))) {
+            barLength = 1;
+        }
+        
+        // Print month label
+        WriteToReport(txtFile, "%04u-%02u | ", 
+               monthlyData[i].year, monthlyData[i].month);
+        
+        // Draw bar
+        for (int j = 0; j < barLength; j++) {
+            WriteToReport(txtFile, "\u2588");          // Unicode block character
+        }
+        
+        // Print value
+        if (chartType == 'O') {
+            WriteToReport(txtFile, " %lu\n", monthlyData[i].orderCount);
+        } else {
+            WriteToReport(txtFile, " $%.2f\n", monthlyData[i].totalRevenue);
+        }
+    }
+    
+    WriteToReport(txtFile, "\n");
+    
+    // No explicit return needed for void function
+}//end function definition DrawASCIIBarChart
+
+/*
+ * Function: AnalyzeSeasonalPatternsByCategory
+ * Purpose: Analyzes seasonal patterns for different product categories
+ * Parameters: txtFile - output file pointer
+ * Returns: void
+ * Note: Processes sales data to find category-specific seasonal trends
+ */
+void AnalyzeSeasonalPatternsByCategory(FILE* txtFile) {
+    FILE* salesFile = NULL;
+    FILE* productsFile = NULL;
+    salesRecord currentSale;
+    productRecord currentProduct;
+    categorySeasonalData categories[20];               // Max 20 categories
+    int categoryCount = 0;
+    int errorOccurred = 0;
+    
+    // Initialize categories array
+    for (int i = 0; i < 20; i++) {
+        InitializeStructureToZero(&categories[i], sizeof(categorySeasonalData));
+    }
+    
+    WriteToReport(txtFile, "\n\n=== SEASONAL PATTERNS BY PRODUCT CATEGORY ===\n");
+    WriteToReport(txtFile, "============================================\n");
+    
+    // Open required files
+    salesFile = OpenFileWithErrorCheck("SalesTable.dat", "rb");
+    productsFile = OpenFileWithErrorCheck("ProductsTable.dat", "rb");
+    
+    if (salesFile == NULL || productsFile == NULL) {
+        WriteToReport(txtFile, "Error: Cannot open required files for category analysis\n");
+        errorOccurred = 1;
+    }
+    
+    if (errorOccurred == 0) {
+        // Process each sale
+        while (fread(&currentSale, sizeof(salesRecord), 1, salesFile) == 1) {
+            // Find product
+            int productFound = 0;
+            rewind(productsFile);
+            
+            while (fread(&currentProduct, sizeof(productRecord), 1, productsFile) == 1 && productFound == 0) {
+                if (currentProduct.productKey == currentSale.productKey) {
+                    productFound = 1;
+                    
+                    // Find or create category entry
+                    int categoryIndex = -1;
+                    int foundCategory = 0;
+                    
+                    for (int i = 0; i < categoryCount && foundCategory == 0; i++) {
+                        if (strcmp(categories[i].category, currentProduct.category) == 0) {
+                            categoryIndex = i;
+                            foundCategory = 1;
+                        }
+                    }
+                    
+                    if (foundCategory == 0 && categoryCount < 20) {
+                        categoryIndex = categoryCount;
+                        strncpy(categories[categoryIndex].category, currentProduct.category, 19);
+                        categories[categoryIndex].category[19] = '\0';
+                        categoryCount++;
+                    }
+                    
+                    if (categoryIndex >= 0) {
+                        double lineRevenue = currentProduct.unitPriceUSD * currentSale.quantity;
+                        lineRevenue = RoundToThirdDecimal(lineRevenue);
+                        
+                        // Assign to quarter
+                        int month = currentSale.orderDate.monthOfYear;
+                        if (month >= 1 && month <= 3) {
+                            categories[categoryIndex].q1Revenue += lineRevenue;
+                            categories[categoryIndex].q1Orders++;
+                        } else if (month >= 4 && month <= 6) {
+                            categories[categoryIndex].q2Revenue += lineRevenue;
+                            categories[categoryIndex].q2Orders++;
+                        } else if (month >= 7 && month <= 9) {
+                            categories[categoryIndex].q3Revenue += lineRevenue;
+                            categories[categoryIndex].q3Orders++;
+                        } else if (month >= 10 && month <= 12) {
+                            categories[categoryIndex].q4Revenue += lineRevenue;
+                            categories[categoryIndex].q4Orders++;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Display results
+        WriteToReport(txtFile, "\n%-20s %12s %12s %12s %12s\n", 
+               "Category", "Q1 Revenue", "Q2 Revenue", "Q3 Revenue", "Q4 Revenue");
+        WriteToReport(txtFile, "--------------------------------------------------------------------------------\n");
+        
+        for (int i = 0; i < categoryCount; i++) {
+            WriteToReport(txtFile, "%-20s $%11.2f $%11.2f $%11.2f $%11.2f\n",
+                   categories[i].category,
+                   categories[i].q1Revenue,
+                   categories[i].q2Revenue,
+                   categories[i].q3Revenue,
+                   categories[i].q4Revenue);
+            
+            // Find peak quarter
+            double maxRevenue = categories[i].q1Revenue;
+            const char* peakQuarter = "Q1";
+            
+            if (categories[i].q2Revenue > maxRevenue) {
+                maxRevenue = categories[i].q2Revenue;
+                peakQuarter = "Q2";
+            }
+            if (categories[i].q3Revenue > maxRevenue) {
+                maxRevenue = categories[i].q3Revenue;
+                peakQuarter = "Q3";
+            }
+            if (categories[i].q4Revenue > maxRevenue) {
+                maxRevenue = categories[i].q4Revenue;
+                peakQuarter = "Q4";
+            }
+            
+            WriteToReport(txtFile, "  Peak season: %s ($%.2f)\n", peakQuarter, maxRevenue);
+        }
+    }
+    
+    if (salesFile != NULL) fclose(salesFile);
+    if (productsFile != NULL) fclose(productsFile);
+}//end function definition AnalyzeSeasonalPatternsByCategory
+
+/*
+ * Function: AnalyzeSeasonalPatternsByRegion
+ * Purpose: Analyzes seasonal patterns for different geographical regions
+ * Parameters: txtFile - output file pointer
+ * Returns: void
+ * Note: Processes sales data to find region-specific seasonal trends
+ */
+void AnalyzeSeasonalPatternsByRegion(FILE* txtFile) {
+    FILE* salesFile = NULL;
+    FILE* productsFile = NULL;
+    FILE* customersFile = NULL;
+    salesRecord currentSale;
+    productRecord currentProduct;
+    customerRecord currentCustomer;
+    regionSeasonalData regions[10];                    // Max 10 regions
+    int regionCount = 0;
+    int errorOccurred = 0;
+    
+    // Initialize regions array
+    for (int i = 0; i < 10; i++) {
+        InitializeStructureToZero(&regions[i], sizeof(regionSeasonalData));
+    }
+    
+    WriteToReport(txtFile, "\n\n=== SEASONAL PATTERNS BY REGION ===\n");
+    WriteToReport(txtFile, "===================================\n");
+    
+    // Open required files
+    salesFile = OpenFileWithErrorCheck("SalesTable.dat", "rb");
+    productsFile = OpenFileWithErrorCheck("ProductsTable.dat", "rb");
+    customersFile = OpenFileWithErrorCheck("CustomersTable.dat", "rb");
+    
+    if (salesFile == NULL || productsFile == NULL || customersFile == NULL) {
+        WriteToReport(txtFile, "Error: Cannot open required files for region analysis\n");
+        errorOccurred = 1;
+    }
+    
+    if (errorOccurred == 0) {
+        // Process each sale
+        while (fread(&currentSale, sizeof(salesRecord), 1, salesFile) == 1) {
+            // Find customer
+            int customerFound = 0;
+            rewind(customersFile);
+            
+            while (fread(&currentCustomer, sizeof(customerRecord), 1, customersFile) == 1 && customerFound == 0) {
+                if (currentCustomer.customerKey == currentSale.customerKey) {
+                    customerFound = 1;
+                    
+                    // Find product for price
+                    int productFound = 0;
+                    rewind(productsFile);
+                    
+                    while (fread(&currentProduct, sizeof(productRecord), 1, productsFile) == 1 && productFound == 0) {
+                        if (currentProduct.productKey == currentSale.productKey) {
+                            productFound = 1;
+                            
+                            // Find or create region entry
+                            int regionIndex = -1;
+                            int foundRegion = 0;
+                            
+                            for (int i = 0; i < regionCount && foundRegion == 0; i++) {
+                                if (strcmp(regions[i].continent, currentCustomer.continent) == 0) {
+                                    regionIndex = i;
+                                    foundRegion = 1;
+                                }
+                            }
+                            
+                            if (foundRegion == 0 && regionCount < 10) {
+                                regionIndex = regionCount;
+                                strncpy(regions[regionIndex].continent, currentCustomer.continent, 19);
+                                regions[regionIndex].continent[19] = '\0';
+                                regionCount++;
+                            }
+                            
+                            if (regionIndex >= 0) {
+                                double lineRevenue = currentProduct.unitPriceUSD * currentSale.quantity;
+                                lineRevenue = RoundToThirdDecimal(lineRevenue);
+                                
+                                // Assign to quarter
+                                int month = currentSale.orderDate.monthOfYear;
+                                if (month >= 1 && month <= 3) {
+                                    regions[regionIndex].q1Revenue += lineRevenue;
+                                    regions[regionIndex].q1Orders++;
+                                } else if (month >= 4 && month <= 6) {
+                                    regions[regionIndex].q2Revenue += lineRevenue;
+                                    regions[regionIndex].q2Orders++;
+                                } else if (month >= 7 && month <= 9) {
+                                    regions[regionIndex].q3Revenue += lineRevenue;
+                                    regions[regionIndex].q3Orders++;
+                                } else if (month >= 10 && month <= 12) {
+                                    regions[regionIndex].q4Revenue += lineRevenue;
+                                    regions[regionIndex].q4Orders++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Display results
+        WriteToReport(txtFile, "\n%-20s %12s %12s %12s %12s\n", 
+               "Region", "Q1 Revenue", "Q2 Revenue", "Q3 Revenue", "Q4 Revenue");
+        WriteToReport(txtFile, "--------------------------------------------------------------------------------\n");
+        
+        for (int i = 0; i < regionCount; i++) {
+            WriteToReport(txtFile, "%-20s $%11.2f $%11.2f $%11.2f $%11.2f\n",
+                   regions[i].continent,
+                   regions[i].q1Revenue,
+                   regions[i].q2Revenue,
+                   regions[i].q3Revenue,
+                   regions[i].q4Revenue);
+            
+            // Find peak quarter
+            double maxRevenue = regions[i].q1Revenue;
+            const char* peakQuarter = "Q1";
+            
+            if (regions[i].q2Revenue > maxRevenue) {
+                maxRevenue = regions[i].q2Revenue;
+                peakQuarter = "Q2";
+            }
+            if (regions[i].q3Revenue > maxRevenue) {
+                maxRevenue = regions[i].q3Revenue;
+                peakQuarter = "Q3";
+            }
+            if (regions[i].q4Revenue > maxRevenue) {
+                maxRevenue = regions[i].q4Revenue;
+                peakQuarter = "Q4";
+            }
+            
+            WriteToReport(txtFile, "  Peak season: %s ($%.2f) - Orders: %lu/%lu/%lu/%lu\n", 
+                   peakQuarter, maxRevenue,
+                   regions[i].q1Orders, regions[i].q2Orders, 
+                   regions[i].q3Orders, regions[i].q4Orders);
+        }
+    }
+    
+    if (salesFile != NULL) fclose(salesFile);
+    if (productsFile != NULL) fclose(productsFile);
+    if (customersFile != NULL) fclose(customersFile);
+}//end function definition AnalyzeSeasonalPatternsByRegion
+
+/*
+ * Function: GenerateTrendAnalysis
+ * Purpose: Analyzes growth trends and patterns over time
+ * Parameters: txtFile - output file pointer
+ *            monthlyData - array of monthly data
+ *            dataCount - number of months
+ * Returns: void
+ * Note: Calculates year-over-year growth and identifies trends
+ */
+void GenerateTrendAnalysis(FILE* txtFile, const monthlySalesData* monthlyData, int dataCount) {
+    WriteToReport(txtFile, "\n\n=== TREND ANALYSIS ===\n");
+    WriteToReport(txtFile, "======================\n");
+    
+    if (dataCount < 2) {
+        WriteToReport(txtFile, "Insufficient data for trend analysis\n");
+        return;
+    }
+    
+    // Calculate month-over-month changes
+    double avgOrderGrowth = 0.0;
+    double avgRevenueGrowth = 0.0;
+    int growthSamples = 0;
+    
+    WriteToReport(txtFile, "\nMonth-over-Month Changes:\n");
+    WriteToReport(txtFile, "%-10s %15s %15s\n", "Period", "Order Change", "Revenue Change");
+    WriteToReport(txtFile, "--------------------------------------------------------\n");
+    
+    for (int i = 1; i < dataCount; i++) {
+        double orderChange = 0.0;
+        double revenueChange = 0.0;
+        
+        if (monthlyData[i-1].orderCount > 0) {
+            orderChange = ((double)monthlyData[i].orderCount - (double)monthlyData[i-1].orderCount) / 
+                         (double)monthlyData[i-1].orderCount * 100.0;
+        }
+        
+        if (monthlyData[i-1].totalRevenue > 0.0) {
+            revenueChange = (monthlyData[i].totalRevenue - monthlyData[i-1].totalRevenue) / 
+                           monthlyData[i-1].totalRevenue * 100.0;
+        }
+        
+        WriteToReport(txtFile, "%04u-%02u %15.2f%% %15.2f%%\n",
+               monthlyData[i].year, monthlyData[i].month,
+               orderChange, revenueChange);
+        
+        avgOrderGrowth += orderChange;
+        avgRevenueGrowth += revenueChange;
+        growthSamples++;
+    }
+    
+    if (growthSamples > 0) {
+        avgOrderGrowth /= growthSamples;
+        avgRevenueGrowth /= growthSamples;
+        
+        WriteToReport(txtFile, "\nAverage Growth Rates:\n");
+        WriteToReport(txtFile, "  Orders: %.2f%% per month\n", avgOrderGrowth);
+        WriteToReport(txtFile, "  Revenue: %.2f%% per month\n", avgRevenueGrowth);
+        
+        // Interpret trends
+        WriteToReport(txtFile, "\nTrend Interpretation:\n");
+        if (avgOrderGrowth > 5.0) {
+            WriteToReport(txtFile, "  \u2713 Strong positive order volume trend\n");
+        } else if (avgOrderGrowth > 0.0) {
+            WriteToReport(txtFile, "  \u2713 Modest positive order volume trend\n");
+        } else if (avgOrderGrowth < -5.0) {
+            WriteToReport(txtFile, "  \u26A0 Declining order volume trend\n");
+        } else {
+            WriteToReport(txtFile, "  \u2192 Stable order volume\n");
+        }
+        
+        if (avgRevenueGrowth > 5.0) {
+            WriteToReport(txtFile, "  \u2713 Strong positive revenue trend\n");
+        } else if (avgRevenueGrowth > 0.0) {
+            WriteToReport(txtFile, "  \u2713 Modest positive revenue trend\n");
+        } else if (avgRevenueGrowth < -5.0) {
+            WriteToReport(txtFile, "  \u26A0 Declining revenue trend\n");
+        } else {
+            WriteToReport(txtFile, "  \u2192 Stable revenue\n");
+        }
+    }
+}//end function definition GenerateTrendAnalysis
+
+/*
+ * Function: GenerateBusinessRecommendations
+ * Purpose: Generates business recommendations based on seasonal patterns
+ * Parameters: txtFile - output file pointer
+ *            monthlyData - array of monthly data
+ *            dataCount - number of months
+ * Returns: void
+ * Note: Provides actionable insights for business planning
+ */
+void GenerateBusinessRecommendations(FILE* txtFile, const monthlySalesData* monthlyData, int dataCount) {
+    WriteToReport(txtFile, "\n\n=== BUSINESS IMPACT & RECOMMENDATIONS ===\n");
+    WriteToReport(txtFile, "=========================================\n");
+    
+    if (dataCount == 0) {
+        return;
+    }
+    
+    // Find peak and low months
+    unsigned long maxOrders = 0;
+    unsigned long minOrders = ULONG_MAX;
+    int peakMonth = 0;
+    int lowMonth = 0;
+    
+    for (int i = 0; i < dataCount; i++) {
+        if (monthlyData[i].orderCount > maxOrders) {
+            maxOrders = monthlyData[i].orderCount;
+            peakMonth = i;
+        }
+        if (monthlyData[i].orderCount < minOrders) {
+            minOrders = monthlyData[i].orderCount;
+            lowMonth = i;
+        }
+    }
+    
+    double variability = 0.0;
+    if (minOrders > 0) {
+        variability = ((double)maxOrders - (double)minOrders) / (double)minOrders * 100.0;
+    }
+    
+    WriteToReport(txtFile, "\n1. PRODUCTION PLANNING:\n");
+    WriteToReport(txtFile, "   Peak Period: %04u-%02u (%lu orders)\n",
+           monthlyData[peakMonth].year, monthlyData[peakMonth].month, maxOrders);
+    WriteToReport(txtFile, "   Low Period: %04u-%02u (%lu orders)\n",
+           monthlyData[lowMonth].year, monthlyData[lowMonth].month, minOrders);
+    WriteToReport(txtFile, "   Seasonality: %.1f%% variance\n", variability);
+    
+    if (variability > 50.0) {
+        WriteToReport(txtFile, "   \u26A0 HIGH SEASONALITY - Recommendations:\n");
+        WriteToReport(txtFile, "     - Increase production capacity 2-3 months before peak\n");
+        WriteToReport(txtFile, "     - Consider flexible workforce (seasonal hiring)\n");
+        WriteToReport(txtFile, "     - Build inventory buffer during low periods\n");
+    } else if (variability > 20.0) {
+        WriteToReport(txtFile, "   \u2192 MODERATE SEASONALITY - Recommendations:\n");
+        WriteToReport(txtFile, "     - Adjust production schedules for peak periods\n");
+        WriteToReport(txtFile, "     - Maintain stable workforce with overtime capability\n");
+    } else {
+        WriteToReport(txtFile, "   \u2713 LOW SEASONALITY - Recommendations:\n");
+        WriteToReport(txtFile, "     - Maintain steady production levels\n");
+        WriteToReport(txtFile, "     - Focus on just-in-time inventory management\n");
+    }
+    
+    WriteToReport(txtFile, "\n2. INVENTORY MANAGEMENT:\n");
+    if (variability > 50.0) {
+        WriteToReport(txtFile, "   \u26A0 Critical Actions:\n");
+        WriteToReport(txtFile, "     - Stock up 60-90 days before peak season\n");
+        WriteToReport(txtFile, "     - Negotiate flexible supplier agreements\n");
+        WriteToReport(txtFile, "     - Implement demand forecasting system\n");
+        WriteToReport(txtFile, "     - Reserve warehouse space for seasonal buildup\n");
+    } else {
+        WriteToReport(txtFile, "   \u2713 Standard Actions:\n");
+        WriteToReport(txtFile, "     - Maintain 30-day safety stock\n");
+        WriteToReport(txtFile, "     - Regular supplier orders with lead time buffer\n");
+    }
+    
+    WriteToReport(txtFile, "\n3. LOGISTICS & DISTRIBUTION:\n");
+    WriteToReport(txtFile, "   - Pre-negotiate carrier capacity for peak months\n");
+    WriteToReport(txtFile, "   - Consider regional distribution centers\n");
+    WriteToReport(txtFile, "   - Plan delivery schedules to avoid peak congestion\n");
+    if (variability > 30.0) {
+        WriteToReport(txtFile, "   - Arrange backup shipping options for peak periods\n");
+        WriteToReport(txtFile, "   - Hire additional logistics staff seasonally\n");
+    }
+    
+    WriteToReport(txtFile, "\n4. MARKETING & SALES:\n");
+    WriteToReport(txtFile, "   - Launch promotional campaigns during low periods\n");
+    WriteToReport(txtFile, "   - Offer pre-order discounts before peak season\n");
+    WriteToReport(txtFile, "   - Create off-season incentives to balance demand\n");
+    WriteToReport(txtFile, "   - Target regional markets based on their peak seasons\n");
+    
+    WriteToReport(txtFile, "\n5. FINANCIAL PLANNING:\n");
+    WriteToReport(txtFile, "   - Budget for seasonal working capital needs\n");
+    WriteToReport(txtFile, "   - Plan cash flow for inventory buildup\n");
+    WriteToReport(txtFile, "   - Negotiate payment terms aligned with seasonal cash flow\n");
+    if (variability > 40.0) {
+        WriteToReport(txtFile, "   - Consider seasonal credit line for peak period\n");
+    }
+    
+    WriteToReport(txtFile, "\n6. STAFFING RECOMMENDATIONS:\n");
+    WriteToReport(txtFile, "   Core Staff: Maintain year-round for %lu orders/month\n", minOrders);
+    if (maxOrders > minOrders * 1.5) {
+        WriteToReport(txtFile, "   Seasonal Staff: Add %.0f%% capacity for peak\n", 
+               ((double)maxOrders / minOrders - 1.0) * 100.0);
+        WriteToReport(txtFile, "   Training: Begin 6-8 weeks before peak season\n");
+    }
+}//end function definition GenerateBusinessRecommendations
+
+/*
+ * Function: GenerateReport3SeasonalPatterns
+ * Purpose: Generates Report 3 - Seasonal Patterns Analysis
+ * Parameters: sortType - "Bubble" or "Merge" to specify sorting algorithm
+ * Returns: void
+ * Note: Aggregates sales by month, shows trends with ASCII charts
+ *       Displays both order volume and revenue patterns
+ *       Uses file-based processing throughout
+ */
+void GenerateReport3SeasonalPatterns(const char* sortType) {
+    FILE* sortedFile = NULL;                           // Sorted monthly data file
+    FILE* txtFile = NULL;                              // Output text report file
+    char tempFileName[300] = {0};                      // Temporary aggregated data file
+    char sortedFileName[300] = {0};                    // Sorted data file
+    char txtFileName[300] = {0};                       // Text report file name
+    char reportTitle[150] = {0};                       // Report title
+    monthlySalesData currentMonth;                     // Current month data
+    monthlySalesData allMonthsData[100];               // Array to store all months for charts
+    int monthsAggregated = 0;                          // Number of months aggregated
+    int monthsSorted = 0;                              // Number of months sorted
+    int monthsRead = 0;                                // Number of months read for display
+    unsigned long totalOrders = 0;                     // Total orders across all months
+    double totalRevenue = 0.0;                         // Total revenue across all months
+    double avgOrdersPerMonth = 0.0;                    // Average orders per month
+    double avgRevenuePerMonth = 0.0;                   // Average revenue per month
+    time_t startTime = 0;                              // Report generation start time
+    time_t sortStartTime = 0;                          // Sorting start time
+    time_t sortEndTime = 0;                            // Sorting end time
+    int errorOccurred = 0;                             // Error flag
+    int sortTypeValid = 0;                             // Sort type validation flag
+    
+    printf("\nGenerating Report 3: Seasonal Patterns and Trends\n");
+    printf("Using %s sort algorithm...\n", sortType);
+    
+    time(&startTime);
+    
+    // Generate filenames
+    sprintf(tempFileName, "temp_monthly_%ld.dat", (long)time(NULL));
+    sprintf(txtFileName, "Report_3_Seasonal_%s_%ld.txt", sortType, (long)time(NULL));
+    
+    // Open text file for report output
+    txtFile = OpenFileWithErrorCheck(txtFileName, "w");
+    if (txtFile == NULL) {
+        printf("Error: Cannot create report text file\n");
+        return;
+    }
+    
+    // Aggregate sales by month
+    monthsAggregated = AggregateSalesByMonth(tempFileName);
+    if (monthsAggregated <= 0) {
+        printf("Error: Failed to aggregate sales data\n");
+        errorOccurred = 1;
+    }
+    
+    if (errorOccurred == 0) {
+        // Generate sorted filename
+        GenerateSortedFileName("Seasonal", sortType, sortedFileName);
+        
+        printf("Sorting monthly data using %s sort...\n", sortType);
+        time(&sortStartTime);
+        
+        // Sort monthly data chronologically
+        if (strcmp(sortType, "Bubble") == 0) {
+            sortTypeValid = 1;
+            monthsSorted = SortBubble(tempFileName, sortedFileName,
+                                     sizeof(monthlySalesData), CompareMonthlySalesData);
+        } else if (strcmp(sortType, "Merge") == 0) {
+            sortTypeValid = 1;
+            monthsSorted = SortMerge(tempFileName, sortedFileName,
+                                    sizeof(monthlySalesData), CompareMonthlySalesData);
+        } else {
+            printf("Error: Invalid sort type '%s'\n", sortType);
+            sortTypeValid = 0;
+            errorOccurred = 1;
+        }
+        
+        if (sortTypeValid == 1 && monthsSorted <= 0) {
+            printf("Error: Sorting failed\n");
+            errorOccurred = 1;
+        }
+        
+        if (sortTypeValid == 1 && monthsSorted > 0) {
+            time(&sortEndTime);
+            printf("Sorting completed: %d months sorted in %.0f seconds\n",
+                   monthsSorted, difftime(sortEndTime, sortStartTime));
+        }
+    }
+    
+    // Clean up temporary file
+    remove(tempFileName);
+    
+    if (errorOccurred == 0) {
+        // Generate report header
+        sprintf(reportTitle, "Report 3: Seasonal Patterns and Trends for Order Volume and Revenue");
+        GenerateReportHeader(txtFile, reportTitle);
+        
+        // Open sorted file and read data
+        sortedFile = OpenFileWithErrorCheck(sortedFileName, "rb");
+        if (sortedFile == NULL) {
+            printf("Error: Cannot open sorted monthly data file\n");
+            errorOccurred = 1;
+        }
+    }
+    
+    if (errorOccurred == 0) {
+        // Read all months and calculate totals
+        WriteToReport(txtFile, "\nMonthly Sales Summary\n");
+        WriteToReport(txtFile, "=====================================================\n");
+        WriteToReport(txtFile, "%-10s %15s %20s\n", "Month", "Orders", "Revenue (USD)");
+        WriteToReport(txtFile, "-----------------------------------------------------\n");
+        
+        monthsRead = 0;
+        while (fread(&currentMonth, sizeof(monthlySalesData), 1, sortedFile) == 1 && monthsRead < 100) {
+            // Display month data
+            WriteToReport(txtFile, "%04u-%02u %15lu %20.2f\n",
+                   currentMonth.year,
+                   currentMonth.month,
+                   currentMonth.orderCount,
+                   currentMonth.totalRevenue);
+            
+            // Store in array for charts
+            allMonthsData[monthsRead] = currentMonth;
+            
+            // Accumulate totals
+            totalOrders += currentMonth.orderCount;
+            totalRevenue += currentMonth.totalRevenue;
+            monthsRead++;
+        }
+        
+        WriteToReport(txtFile, "=====================================================\n");
+        WriteToReport(txtFile, "%-10s %15lu %20.2f\n", "TOTAL", totalOrders, totalRevenue);
+        
+        // Calculate averages
+        if (monthsRead > 0) {
+            avgOrdersPerMonth = (double)totalOrders / (double)monthsRead;
+            avgRevenuePerMonth = totalRevenue / (double)monthsRead;
+            
+            WriteToReport(txtFile, "%-10s %15.2f %20.2f\n", "AVERAGE", avgOrdersPerMonth, avgRevenuePerMonth);
+        }
+        
+        WriteToReport(txtFile, "\nTotal months analyzed: %d\n", monthsRead);
+        
+        // Generate ASCII charts
+        DrawASCIIBarChart(txtFile, allMonthsData, monthsRead, 'O');
+        DrawASCIIBarChart(txtFile, allMonthsData, monthsRead, 'R');
+        
+        // Seasonal analysis
+        WriteToReport(txtFile, "\nSeasonal Analysis\n");
+        WriteToReport(txtFile, "=================\n");
+        
+        // Analyze patterns by grouping months into quarters
+        unsigned long q1Orders = 0, q2Orders = 0, q3Orders = 0, q4Orders = 0;
+        double q1Revenue = 0.0, q2Revenue = 0.0, q3Revenue = 0.0, q4Revenue = 0.0;
+        int q1Count = 0, q2Count = 0, q3Count = 0, q4Count = 0;
+        
+        for (int i = 0; i < monthsRead; i++) {
+            if (allMonthsData[i].month >= 1 && allMonthsData[i].month <= 3) {
+                q1Orders += allMonthsData[i].orderCount;
+                q1Revenue += allMonthsData[i].totalRevenue;
+                q1Count++;
+            } else if (allMonthsData[i].month >= 4 && allMonthsData[i].month <= 6) {
+                q2Orders += allMonthsData[i].orderCount;
+                q2Revenue += allMonthsData[i].totalRevenue;
+                q2Count++;
+            } else if (allMonthsData[i].month >= 7 && allMonthsData[i].month <= 9) {
+                q3Orders += allMonthsData[i].orderCount;
+                q3Revenue += allMonthsData[i].totalRevenue;
+                q3Count++;
+            } else if (allMonthsData[i].month >= 10 && allMonthsData[i].month <= 12) {
+                q4Orders += allMonthsData[i].orderCount;
+                q4Revenue += allMonthsData[i].totalRevenue;
+                q4Count++;
+            }
+        }
+        
+        WriteToReport(txtFile, "\nQuarterly Averages:\n");
+        if (q1Count > 0) {
+            WriteToReport(txtFile, "Q1 (Jan-Mar): %.2f orders/month, $%.2f revenue/month\n",
+                   (double)q1Orders / q1Count, q1Revenue / q1Count);
+        }
+        if (q2Count > 0) {
+            WriteToReport(txtFile, "Q2 (Apr-Jun): %.2f orders/month, $%.2f revenue/month\n",
+                   (double)q2Orders / q2Count, q2Revenue / q2Count);
+        }
+        if (q3Count > 0) {
+            WriteToReport(txtFile, "Q3 (Jul-Sep): %.2f orders/month, $%.2f revenue/month\n",
+                   (double)q3Orders / q3Count, q3Revenue / q3Count);
+        }
+        if (q4Count > 0) {
+            WriteToReport(txtFile, "Q4 (Oct-Dec): %.2f orders/month, $%.2f revenue/month\n",
+                   (double)q4Orders / q4Count, q4Revenue / q4Count);
+        }
+        
+        // Identify peak quarter
+        double maxQuarterRevenue = q1Revenue;
+        const char* peakQuarter = "Q1 (Winter)";
+        if (q2Revenue > maxQuarterRevenue) {
+            maxQuarterRevenue = q2Revenue;
+            peakQuarter = "Q2 (Spring)";
+        }
+        if (q3Revenue > maxQuarterRevenue) {
+            maxQuarterRevenue = q3Revenue;
+            peakQuarter = "Q3 (Summer)";
+        }
+        if (q4Revenue > maxQuarterRevenue) {
+            maxQuarterRevenue = q4Revenue;
+            peakQuarter = "Q4 (Fall)";
+        }
+        
+        WriteToReport(txtFile, "\nPEAK SEASON: %s with total revenue of $%.2f\n", 
+               peakQuarter, maxQuarterRevenue);
+        
+        // Perform advanced analyses
+        GenerateTrendAnalysis(txtFile, allMonthsData, monthsRead);
+        AnalyzeSeasonalPatternsByCategory(txtFile);
+        AnalyzeSeasonalPatternsByRegion(txtFile);
+        GenerateBusinessRecommendations(txtFile, allMonthsData, monthsRead);
+        
+        fclose(sortedFile);
+        
+        GenerateReportFooter(txtFile, startTime);
+        
+        if (txtFile != NULL) {
+            fclose(txtFile);
+            txtFile = NULL;
+        }
+        
+        printf("\nReport saved successfully in: %s\n", txtFileName);
+        
+        // Clean up sorted file
+        remove(sortedFileName);
+    } else {
+        // Error occurred - clean up
+        if (txtFile != NULL) {
+            fclose(txtFile);
+            remove(txtFileName);
+        }
+    }
+    
+    // No explicit return needed for void function
+}//end function definition GenerateReport3SeasonalPatterns
+
 // ====================== REPORT GENERATORS ======================
 
 /*
@@ -1777,19 +2712,22 @@ void SearchInReport2(const char* sortedFileName) {
                     printf("Show how many records? (0 = all): ");
                     scanf("%d", &maxShow);
                     
-                    while (fread(&foundRecord, sizeof(productCustomerRecord), 1, sortedFile) == 1) {
+                    int continueReading = 1;
+                    while (fread(&foundRecord, sizeof(productCustomerRecord), 1, sortedFile) == 1 && continueReading == 1) {
                         if (maxShow > 0 && count >= maxShow) {
                             printf("... (showing first %d records)\n", maxShow);
-                            break;
+                            continueReading = 0;  // Stop loop instead of break
                         }
                         
-                        printf("%-30s %-15s %-15s %-20s %-20s\n",
-                               foundRecord.product.productName,
-                               foundRecord.customer.continent,
-                               foundRecord.customer.country,
-                               foundRecord.customer.state,
-                               foundRecord.customer.city);
-                        count++;
+                        if (continueReading == 1) {
+                            printf("%-30s %-15s %-15s %-20s %-20s\n",
+                                   foundRecord.product.productName,
+                                   foundRecord.customer.continent,
+                                   foundRecord.customer.country,
+                                   foundRecord.customer.state,
+                                   foundRecord.customer.city);
+                            count++;
+                        }
                     }
                     
                     printf("------------------------------------------------------\n");
@@ -2027,7 +2965,7 @@ void SearchInReport5(const char* sortedFileName) {
                                 
                                 if (maxShow > 0 && customerCount >= maxShow) {
                                     printf("... (showing first %d customers)\n", maxShow);
-                                    break;
+                                    fseek(sortedFile, 0, SEEK_END);  // Jump to end to exit loop naturally
                                 }
                             }
                             
@@ -2046,11 +2984,12 @@ void SearchInReport5(const char* sortedFileName) {
                         // Calculate total
                         if (productsFile != NULL) {
                             rewind(productsFile);
-                            while (fread(&currentProduct, sizeof(productRecord), 1, productsFile) == 1) {
+                            int productFoundInLoop = 0;
+                            while (fread(&currentProduct, sizeof(productRecord), 1, productsFile) == 1 && productFoundInLoop == 0) {
                                 if (currentProduct.productKey == foundRecord.sale.productKey) {
                                     double lineValue = currentProduct.unitPriceUSD * foundRecord.sale.quantity;
                                     currentCustomerTotal += RoundToThirdDecimal(lineValue);
-                                    break;
+                                    productFoundInLoop = 1;  // Exit loop condition instead of break
                                 }
                             }
                         }
@@ -2416,7 +3355,7 @@ void GenerateReport2ProductTypesAndLocations(const char* sortType) {
             }
             
             // Success message
-            printf("\nReporte guardado exitosamente en: %s\n", txtFileName);
+            printf("\nReport saved successfully in: %s\n", txtFileName);
             
             // Ask user if they want to search for specific products
             printf("\nDo you want to search for specific products in this report? (y/n): ");
@@ -4438,8 +5377,35 @@ void ExecuteMainProgramLoop() {
         }
         else if (mainOption == 3)  // Report: Seasonal patterns analysis
         {
-            printf("Report 3 not yet implemented. Coming soon!\n");
-            // TODO: Implement seasonal patterns analysis report
+            if (subOption == 1) {
+                // Option 3.1: Use Bubble Sort
+                GenerateReport3SeasonalPatterns("Bubble");
+            } else if (subOption == 2) {
+                // Option 3.2: Use Merge Sort
+                GenerateReport3SeasonalPatterns("Merge");
+            } else if (subOption == 0) {
+                // Option 3: Ask user to choose sorting method
+                int sortChoice = 0;
+                printf("\nSelect sorting algorithm:\n");
+                printf("1. Bubble Sort\n");
+                printf("2. Merge Sort\n");
+                printf("Your choice: ");
+                
+                if (scanf("%d", &sortChoice) == 1) {
+                    if (sortChoice == 1) {
+                        GenerateReport3SeasonalPatterns("Bubble");
+                    } else if (sortChoice == 2) {
+                        GenerateReport3SeasonalPatterns("Merge");
+                    } else {
+                        printf("Invalid sorting choice.\n");
+                    }
+                } else {
+                    printf("Invalid input.\n");
+                    while (getchar() != '\n'); // Clean input buffer
+                }
+            } else {
+                printf("Invalid sub-option for Report 3. Use 3.1 or 3.2\n");
+            }
             system("pause");
         }
         else if (mainOption == 4)  // Report: Average delivery time analysis
