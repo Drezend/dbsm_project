@@ -56,6 +56,7 @@ int ParseExchangeRateDate(const char* dateString, dateStructure* parsedDate);
 void GenerateReport2ProductTypesAndLocations(const char* sortType);
 void GenerateReport5CustomerSalesListing(const char* sortType);
 void GenerateReport3SeasonalPatterns(const char* sortType);
+void GenerateReport4DeliveryTimeAnalysis(const char* sortType);
 void WriteToReport(FILE* txtFile, const char* format, ...);
 void GenerateReportHeader(FILE* txtFile, const char* reportTitle);
 void GenerateReportFooter(FILE* txtFile, time_t startTime);
@@ -1213,6 +1214,56 @@ int CompareDates(const dateStructure* date1, const dateStructure* date2) {
 }//end function definition CompareDates
 
 /*
+ * Function: ToLowerCase
+ * Purpose: Converts a string to lowercase for case-insensitive comparisons
+ * Parameters: dest - destination buffer
+ *            src - source string
+ *            maxLen - maximum length to copy
+ * Returns: void
+ * Note: Helper function for flexible searching
+ */
+void ToLowerCase(char* dest, const char* src, size_t maxLen) {
+    size_t i = 0;
+    while (i < maxLen - 1 && src[i] != '\0') {
+        if (src[i] >= 'A' && src[i] <= 'Z') {
+            dest[i] = src[i] + 32;  // Convert to lowercase
+        } else {
+            dest[i] = src[i];
+        }
+        i++;
+    }
+    dest[i] = '\0';
+}
+
+/*
+ * Function: CompareProductNameOnly
+ * Purpose: Compares two product records by product name only (for flexible searching)
+ * Parameters: record1 - pointer to first product-customer combined record
+ *            record2 - pointer to second product-customer combined record
+ * Returns: int - comparison result for ProductName only
+ * Note: Used for partial searches in Report 2
+ */
+int CompareProductNameOnly(const void* record1, const void* record2) {
+    const productCustomerRecord* pc1 = (const productCustomerRecord*)record1;
+    const productCustomerRecord* pc2 = (const productCustomerRecord*)record2;
+    return strcmp(pc1->product.productName, pc2->product.productName);
+}
+
+/*
+ * Function: CompareCustomerNameOnly
+ * Purpose: Compares two sales records by customer name only (for flexible searching)
+ * Parameters: record1 - pointer to first sales-customer combined record
+ *            record2 - pointer to second sales-customer combined record
+ * Returns: int - comparison result for Customer Name only
+ * Note: Used for partial searches in Report 5
+ */
+int CompareCustomerNameOnly(const void* record1, const void* record2) {
+    const salesCustomerRecord* sc1 = (const salesCustomerRecord*)record1;
+    const salesCustomerRecord* sc2 = (const salesCustomerRecord*)record2;
+    return strcmp(sc1->customer.name, sc2->customer.name);
+}
+
+/*
  * Function: CompareProductsForReport2
  * Purpose: Compares two product records for Option 2 report sorting
  * Parameters: record1 - pointer to first product-customer combined record
@@ -1832,7 +1883,7 @@ void AnalyzeSeasonalPatternsByCategory(FILE* txtFile) {
     }
     
     WriteToReport(txtFile, "\n\n=== SEASONAL PATTERNS BY PRODUCT CATEGORY ===\n");
-    WriteToReport(txtFile, "============================================\n");
+    WriteToReport(txtFile, "=================================================================\n");
     
     // Open required files
     salesFile = OpenFileWithErrorCheck("SalesTable.dat", "rb");
@@ -1958,7 +2009,7 @@ void AnalyzeSeasonalPatternsByRegion(FILE* txtFile) {
     }
     
     WriteToReport(txtFile, "\n\n=== SEASONAL PATTERNS BY REGION ===\n");
-    WriteToReport(txtFile, "===================================\n");
+    WriteToReport(txtFile, "=================================================================\n");
     
     // Open required files
     salesFile = OpenFileWithErrorCheck("SalesTable.dat", "rb");
@@ -2505,6 +2556,603 @@ void GenerateReport3SeasonalPatterns(const char* sortType) {
     // No explicit return needed for void function
 }//end function definition GenerateReport3SeasonalPatterns
 
+// ====================== REPORT 4: DELIVERY TIME ANALYSIS ======================
+
+/*
+ * Function: CalculateDeliveryDays
+ * Purpose: Calculates the number of days between order and delivery dates
+ * Parameters: orderDate - pointer to order date structure
+ *            deliveryDate - pointer to delivery date structure
+ * Returns: int - number of days between dates (0 if same day, -1 if invalid)
+ * Note: Simple calculation assuming all months have 30 days for consistency
+ */
+int CalculateDeliveryDays(const dateStructure* orderDate, const dateStructure* deliveryDate) {
+    int orderDays = 0;                                 // Order date in days
+    int deliveryDays = 0;                              // Delivery date in days
+    int difference = 0;                                // Day difference
+    int result = -1;                                   // Return value
+    
+    if (orderDate != NULL && deliveryDate != NULL) {
+        // Convert dates to days (simplified: year*365 + month*30 + day)
+        orderDays = orderDate->yearValue * 365 + orderDate->monthOfYear * 30 + orderDate->dayOfMonth;
+        deliveryDays = deliveryDate->yearValue * 365 + deliveryDate->monthOfYear * 30 + deliveryDate->dayOfMonth;
+        
+        difference = deliveryDays - orderDays;
+        
+        // Ensure non-negative result
+        if (difference >= 0) {
+            result = difference;
+        } else {
+            result = -1;                               // Invalid (delivery before order)
+        }
+    }
+    
+    return result;                                     // Single return point
+}//end function definition CalculateDeliveryDays
+
+/*
+ * Function: CompareMonthlyDeliveryData
+ * Purpose: Compares two monthlyDeliveryData records for chronological sorting
+ * Parameters: record1 - pointer to first monthlyDeliveryData
+ *            record2 - pointer to second monthlyDeliveryData
+ * Returns: int - comparison result for Year + Month
+ * Note: Used for sorting monthly delivery data chronologically
+ */
+int CompareMonthlyDeliveryData(const void* record1, const void* record2) {
+    const monthlyDeliveryData* data1 = (const monthlyDeliveryData*)record1;
+    const monthlyDeliveryData* data2 = (const monthlyDeliveryData*)record2;
+    int result = 0;
+    
+    // Compare by year first
+    result = (int)data1->year - (int)data2->year;
+    
+    // If years equal, compare by month
+    if (result == 0) {
+        result = (int)data1->month - (int)data2->month;
+    }
+    
+    return result;
+}//end function definition CompareMonthlyDeliveryData
+
+/*
+ * Function: AggregateDeliveryTimesByMonth
+ * Purpose: Aggregates delivery times by month from SalesTable
+ * Parameters: outputFileName - name of file to store monthly aggregated data
+ * Returns: int - number of months processed, -1 on error
+ * Note: Processes sales file line-by-line without loading all data into memory
+ *       Calculates delivery time statistics per month
+ */
+int AggregateDeliveryTimesByMonth(const char* outputFileName) {
+    FILE* salesFile = NULL;                            // Sales table file
+    FILE* monthlyFile = NULL;                          // Monthly aggregated data file
+    salesRecord currentSale;                           // Current sales record
+    monthlyDeliveryData monthlyData[100];              // Array for monthly data (max 100 months)
+    int monthCount = 0;                                // Number of unique months
+    int recordsProcessed = 0;                          // Records processed counter
+    int errorOccurred = 0;                             // Error flag
+    int returnValue = -1;                              // Return value
+    int deliveryDays = 0;                              // Delivery time in days
+    
+    // Initialize monthly data array
+    for (int i = 0; i < 100; i++) {
+        InitializeStructureToZero(&monthlyData[i], sizeof(monthlyDeliveryData));
+        monthlyData[i].minDeliveryDays = USHRT_MAX;    // Initialize to max value
+    }
+    
+    // Open sales file
+    salesFile = OpenFileWithErrorCheck("SalesTable.dat", "rb");
+    if (salesFile == NULL) {
+        printf("Error: Cannot open SalesTable.dat\n");
+        errorOccurred = 1;
+        returnValue = -1;
+    }
+    
+    if (errorOccurred == 0) {
+        printf("Aggregating delivery times by month...\n");
+        
+        // Process each sales record
+        while (fread(&currentSale, sizeof(salesRecord), 1, salesFile) == 1 && errorOccurred == 0) {
+            recordsProcessed++;
+            
+            // Calculate delivery time
+            deliveryDays = CalculateDeliveryDays(&currentSale.orderDate, &currentSale.deliveryDate);
+            
+            // Only process valid delivery times
+            if (deliveryDays >= 0) {
+                // Find the month index in our array
+                int monthIndex = -1;
+                int foundMonth = 0;
+                
+                for (int i = 0; i < monthCount && foundMonth == 0; i++) {
+                    if (monthlyData[i].year == currentSale.orderDate.yearValue &&
+                        monthlyData[i].month == currentSale.orderDate.monthOfYear) {
+                        monthIndex = i;
+                        foundMonth = 1;
+                    }
+                }
+                
+                // If month not found, create new entry
+                if (foundMonth == 0 && monthCount < 100) {
+                    monthIndex = monthCount;
+                    monthlyData[monthIndex].year = currentSale.orderDate.yearValue;
+                    monthlyData[monthIndex].month = currentSale.orderDate.monthOfYear;
+                    monthlyData[monthIndex].orderCount = 0;
+                    monthlyData[monthIndex].totalDeliveryDays = 0;
+                    monthlyData[monthIndex].minDeliveryDays = USHRT_MAX;
+                    monthlyData[monthIndex].maxDeliveryDays = 0;
+                    monthCount++;
+                }
+                
+                // If we found or created a valid month entry
+                if (monthIndex >= 0 && monthIndex < 100) {
+                    monthlyData[monthIndex].orderCount++;
+                    monthlyData[monthIndex].totalDeliveryDays += deliveryDays;
+                    
+                    // Update min
+                    if (deliveryDays < monthlyData[monthIndex].minDeliveryDays) {
+                        monthlyData[monthIndex].minDeliveryDays = deliveryDays;
+                    }
+                    
+                    // Update max
+                    if (deliveryDays > monthlyData[monthIndex].maxDeliveryDays) {
+                        monthlyData[monthIndex].maxDeliveryDays = deliveryDays;
+                    }
+                }
+            }
+        }
+        
+        // Calculate averages
+        for (int i = 0; i < monthCount; i++) {
+            if (monthlyData[i].orderCount > 0) {
+                monthlyData[i].avgDeliveryDays = (double)monthlyData[i].totalDeliveryDays / 
+                                                 (double)monthlyData[i].orderCount;
+                monthlyData[i].avgDeliveryDays = RoundToThirdDecimal(monthlyData[i].avgDeliveryDays);
+            }
+        }
+        
+        printf("Processed %d sales records into %d months\n", recordsProcessed, monthCount);
+    }
+    
+    // Close input file
+    if (salesFile != NULL) fclose(salesFile);
+    
+    // Write aggregated data to file
+    if (errorOccurred == 0 && monthCount > 0) {
+        monthlyFile = OpenFileWithErrorCheck(outputFileName, "wb");
+        if (monthlyFile == NULL) {
+            printf("Error: Cannot create monthly delivery data file\n");
+            errorOccurred = 1;
+            returnValue = -1;
+        } else {
+            // Write all monthly records
+            for (int i = 0; i < monthCount; i++) {
+                if (fwrite(&monthlyData[i], sizeof(monthlyDeliveryData), 1, monthlyFile) != 1) {
+                    printf("Error: Failed to write monthly delivery record %d\n", i);
+                    errorOccurred = 1;
+                    returnValue = -1;
+                }
+            }
+            
+            fclose(monthlyFile);
+            
+            if (errorOccurred == 0) {
+                returnValue = monthCount;
+            }
+        }
+    }
+    
+    return returnValue;                                // Single return point
+}//end function definition AggregateDeliveryTimesByMonth
+
+/*
+ * Function: DrawDeliveryTimeChart
+ * Purpose: Generates ASCII bar chart for visualizing delivery times
+ * Parameters: txtFile - output file pointer (NULL to write only to console)
+ *            monthlyData - array of monthly delivery data
+ *            dataCount - number of months in the array
+ * Returns: void
+ * Note: Creates horizontal bar chart showing average delivery times
+ */
+void DrawDeliveryTimeChart(FILE* txtFile, const monthlyDeliveryData* monthlyData, int dataCount) {
+    double maxAvg = 0.0;                               // Maximum average delivery time
+    int maxBarLength = 60;                             // Maximum bar length in characters
+    double scaleFactor = 0.0;                          // Scale factor for bars
+    
+    if (dataCount <= 0) {
+        WriteToReport(txtFile, "No data to display\n");
+        return;
+    }
+    
+    // Find maximum value for scaling
+    for (int i = 0; i < dataCount; i++) {
+        if (monthlyData[i].avgDeliveryDays > maxAvg) {
+            maxAvg = monthlyData[i].avgDeliveryDays;
+        }
+    }
+    
+    // Calculate scale factor
+    scaleFactor = (maxAvg > 0.0) ? (double)maxBarLength / maxAvg : 0.0;
+    
+    // Draw chart header
+    WriteToReport(txtFile, "\n=== AVERAGE DELIVERY TIME BY MONTH ===\n");
+    WriteToReport(txtFile, "======================================\n");
+    
+    // Draw bars for each month
+    for (int i = 0; i < dataCount; i++) {
+        int barLength = 0;                             // Length of bar for this month
+        
+        // Calculate bar length
+        barLength = (int)(monthlyData[i].avgDeliveryDays * scaleFactor);
+        
+        // Ensure at least 1 character if value > 0
+        if (barLength == 0 && monthlyData[i].avgDeliveryDays > 0.0) {
+            barLength = 1;
+        }
+        
+        // Print month label
+        WriteToReport(txtFile, "%04u-%02u | ", 
+               monthlyData[i].year, monthlyData[i].month);
+        
+        // Draw bar
+        for (int j = 0; j < barLength; j++) {
+            WriteToReport(txtFile, "█");
+        }
+        
+        // Print value
+        WriteToReport(txtFile, " %.2f days\n", monthlyData[i].avgDeliveryDays);
+    }
+    
+    WriteToReport(txtFile, "\n");
+}//end function definition DrawDeliveryTimeChart
+
+/*
+ * Function: AnalyzeDeliveryTrends
+ * Purpose: Analyzes delivery time trends and changes over time
+ * Parameters: txtFile - output file pointer
+ *            monthlyData - array of monthly data
+ *            dataCount - number of months
+ * Returns: void
+ * Note: Calculates improvements/deteriorations in delivery times
+ */
+void AnalyzeDeliveryTrends(FILE* txtFile, const monthlyDeliveryData* monthlyData, int dataCount) {
+    WriteToReport(txtFile, "\n=== DELIVERY TIME TREND ANALYSIS ===\n");
+    WriteToReport(txtFile, "====================================\n");
+    
+    if (dataCount < 2) {
+        WriteToReport(txtFile, "Insufficient data for trend analysis\n");
+        return;
+    }
+    
+    // Calculate month-over-month changes
+    double avgChange = 0.0;
+    int changeCount = 0;
+    int improvementMonths = 0;
+    int deteriorationMonths = 0;
+    
+    WriteToReport(txtFile, "\nMonth-over-Month Changes:\n");
+    WriteToReport(txtFile, "%-10s %15s %15s\n", "Period", "Avg Days", "Change");
+    WriteToReport(txtFile, "----------------------------------------------------\n");
+    
+    for (int i = 1; i < dataCount; i++) {
+        double change = monthlyData[i].avgDeliveryDays - monthlyData[i-1].avgDeliveryDays;
+        double percentChange = 0.0;
+        
+        if (monthlyData[i-1].avgDeliveryDays > 0.0) {
+            percentChange = (change / monthlyData[i-1].avgDeliveryDays) * 100.0;
+        }
+        
+        WriteToReport(txtFile, "%04u-%02u %15.2f %+14.2f (%.1f%%)\n",
+               monthlyData[i].year, monthlyData[i].month,
+               monthlyData[i].avgDeliveryDays, change, percentChange);
+        
+        avgChange += change;
+        changeCount++;
+        
+        if (change < 0) {
+            improvementMonths++;
+        } else if (change > 0) {
+            deteriorationMonths++;
+        }
+    }
+    
+    if (changeCount > 0) {
+        avgChange /= changeCount;
+        
+        WriteToReport(txtFile, "\nTrend Summary:\n");
+        WriteToReport(txtFile, "  Average change per month: %+.2f days\n", avgChange);
+        WriteToReport(txtFile, "  Months with improvement: %d\n", improvementMonths);
+        WriteToReport(txtFile, "  Months with deterioration: %d\n", deteriorationMonths);
+        
+        // Interpret trend
+        WriteToReport(txtFile, "\nInterpretation:\n");
+        if (avgChange < -0.5) {
+            WriteToReport(txtFile, "  ✓ Positive trend - Delivery times are improving\n");
+        } else if (avgChange > 0.5) {
+            WriteToReport(txtFile, "  ⚠ Negative trend - Delivery times are increasing\n");
+        } else {
+            WriteToReport(txtFile, "  → Stable - Delivery times remain consistent\n");
+        }
+    }
+}//end function definition AnalyzeDeliveryTrends
+
+/*
+ * Function: GenerateDeliveryRecommendations
+ * Purpose: Generates business recommendations based on delivery performance
+ * Parameters: txtFile - output file pointer
+ *            monthlyData - array of monthly data
+ *            dataCount - number of months
+ *            overallAvg - overall average delivery time
+ * Returns: void
+ * Note: Provides actionable insights for logistics improvement
+ */
+void GenerateDeliveryRecommendations(FILE* txtFile, const monthlyDeliveryData* monthlyData, 
+                                     int dataCount, double overallAvg) {
+    WriteToReport(txtFile, "\n\n=== BUSINESS RECOMMENDATIONS ===\n");
+    WriteToReport(txtFile, "================================\n");
+    
+    if (dataCount == 0) {
+        return;
+    }
+    
+    // Find best and worst months
+    double bestAvg = 999999.0;
+    double worstAvg = 0.0;
+    int bestMonth = 0;
+    int worstMonth = 0;
+    
+    for (int i = 0; i < dataCount; i++) {
+        if (monthlyData[i].avgDeliveryDays < bestAvg) {
+            bestAvg = monthlyData[i].avgDeliveryDays;
+            bestMonth = i;
+        }
+        if (monthlyData[i].avgDeliveryDays > worstAvg) {
+            worstAvg = monthlyData[i].avgDeliveryDays;
+            worstMonth = i;
+        }
+    }
+    
+    double performanceVariation = worstAvg - bestAvg;
+    
+    WriteToReport(txtFile, "\n1. LOGISTICS PERFORMANCE:\n");
+    WriteToReport(txtFile, "   Overall average delivery time: %.2f days\n", overallAvg);
+    WriteToReport(txtFile, "   Best performance: %.2f days (%04u-%02u)\n",
+           bestAvg, monthlyData[bestMonth].year, monthlyData[bestMonth].month);
+    WriteToReport(txtFile, "   Worst performance: %.2f days (%04u-%02u)\n",
+           worstAvg, monthlyData[worstMonth].year, monthlyData[worstMonth].month);
+    WriteToReport(txtFile, "   Performance variation: %.2f days\n", performanceVariation);
+    
+    WriteToReport(txtFile, "\n2. TARGET SETTING:\n");
+    if (overallAvg <= 5.0) {
+        WriteToReport(txtFile, "   ✓ EXCELLENT - Current performance is very competitive\n");
+        WriteToReport(txtFile, "   Target: Maintain average below 5 days\n");
+        WriteToReport(txtFile, "   Focus: Consistency and quality\n");
+    } else if (overallAvg <= 10.0) {
+        WriteToReport(txtFile, "   ✓ GOOD - Performance meets industry standards\n");
+        WriteToReport(txtFile, "   Target: Reduce to %.2f days (10%% improvement)\n", overallAvg * 0.9);
+        WriteToReport(txtFile, "   Focus: Optimize high-volume routes\n");
+    } else if (overallAvg <= 15.0) {
+        WriteToReport(txtFile, "   ⚠ MODERATE - Room for significant improvement\n");
+        WriteToReport(txtFile, "   Target: Reduce to %.2f days (20%% improvement)\n", overallAvg * 0.8);
+        WriteToReport(txtFile, "   Focus: Process optimization and carrier performance\n");
+    } else {
+        WriteToReport(txtFile, "   ⚠ NEEDS IMPROVEMENT - Delivery times are concerning\n");
+        WriteToReport(txtFile, "   Target: Reduce to %.2f days (30%% improvement)\n", overallAvg * 0.7);
+        WriteToReport(txtFile, "   Focus: Complete logistics overhaul needed\n");
+    }
+    
+    WriteToReport(txtFile, "\n3. RECOMMENDED ACTIONS:\n");
+    if (performanceVariation > 5.0) {
+        WriteToReport(txtFile, "   ⚠ HIGH VARIATION DETECTED:\n");
+        WriteToReport(txtFile, "   - Investigate causes of delays in worst months\n");
+        WriteToReport(txtFile, "   - Standardize processes across all periods\n");
+        WriteToReport(txtFile, "   - Implement seasonal capacity planning\n");
+    }
+    
+    WriteToReport(txtFile, "\n   General Improvements:\n");
+    WriteToReport(txtFile, "   - Negotiate service level agreements with carriers\n");
+    WriteToReport(txtFile, "   - Implement real-time tracking systems\n");
+    WriteToReport(txtFile, "   - Optimize warehouse locations for faster delivery\n");
+    WriteToReport(txtFile, "   - Review and streamline order processing workflow\n");
+    WriteToReport(txtFile, "   - Consider regional distribution centers\n");
+    
+    if (overallAvg > 10.0) {
+        WriteToReport(txtFile, "\n   Priority Actions:\n");
+        WriteToReport(txtFile, "   - Evaluate alternative shipping carriers\n");
+        WriteToReport(txtFile, "   - Implement expedited shipping options\n");
+        WriteToReport(txtFile, "   - Review inventory positioning strategy\n");
+    }
+    
+    WriteToReport(txtFile, "\n4. MONITORING STRATEGY:\n");
+    WriteToReport(txtFile, "   - Track delivery times daily\n");
+    WriteToReport(txtFile, "   - Set alerts for orders exceeding %.0f days\n", overallAvg * 1.5);
+    WriteToReport(txtFile, "   - Monthly review of carrier performance\n");
+    WriteToReport(txtFile, "   - Customer feedback on delivery satisfaction\n");
+}//end function definition GenerateDeliveryRecommendations
+
+/*
+ * Function: GenerateReport4DeliveryTimeAnalysis
+ * Purpose: Generates Report 4 - Average Delivery Time Analysis
+ * Parameters: sortType - "Bubble" or "Merge" to specify sorting algorithm
+ * Returns: void
+ * Note: Analyzes delivery performance and trends over time
+ *       Similar structure to Report 3 with charts and recommendations
+ */
+void GenerateReport4DeliveryTimeAnalysis(const char* sortType) {
+    FILE* sortedFile = NULL;                           // Sorted monthly data file
+    FILE* txtFile = NULL;                              // Output text report file
+    char tempFileName[300] = {0};                      // Temporary aggregated data file
+    char sortedFileName[300] = {0};                    // Sorted data file
+    char txtFileName[300] = {0};                       // Text report file name
+    char reportTitle[150] = {0};                       // Report title
+    monthlyDeliveryData currentMonth;                  // Current month data
+    monthlyDeliveryData allMonthsData[100];            // Array to store all months
+    int monthsAggregated = 0;                          // Number of months aggregated
+    int monthsSorted = 0;                              // Number of months sorted
+    int monthsRead = 0;                                // Number of months read
+    unsigned long totalOrders = 0;                     // Total orders
+    double overallAvg = 0.0;                           // Overall average delivery time
+    unsigned short globalMin = USHRT_MAX;              // Global minimum
+    unsigned short globalMax = 0;                      // Global maximum
+    time_t startTime = 0;                              // Report generation start time
+    time_t sortStartTime = 0;                          // Sorting start time
+    time_t sortEndTime = 0;                            // Sorting end time
+    int errorOccurred = 0;                             // Error flag
+    int sortTypeValid = 0;                             // Sort type validation flag
+    
+    printf("\nGenerating Report 4: Delivery Time Analysis\n");
+    printf("Using %s sort algorithm...\n", sortType);
+    
+    time(&startTime);
+    
+    // Generate filenames
+    sprintf(tempFileName, "temp_delivery_%ld.dat", (long)time(NULL));
+    sprintf(txtFileName, "Report_4_Delivery_%s_%ld.txt", sortType, (long)time(NULL));
+    
+    // Open text file for report output
+    txtFile = OpenFileWithErrorCheck(txtFileName, "w");
+    if (txtFile == NULL) {
+        printf("Error: Cannot create report text file\n");
+        return;
+    }
+    
+    // Aggregate delivery times by month
+    monthsAggregated = AggregateDeliveryTimesByMonth(tempFileName);
+    if (monthsAggregated <= 0) {
+        printf("Error: Failed to aggregate delivery data\n");
+        errorOccurred = 1;
+    }
+    
+    if (errorOccurred == 0) {
+        // Generate sorted filename
+        GenerateSortedFileName("Delivery", sortType, sortedFileName);
+        
+        printf("Sorting monthly data using %s sort...\n", sortType);
+        time(&sortStartTime);
+        
+        // Sort monthly data chronologically
+        if (strcmp(sortType, "Bubble") == 0) {
+            sortTypeValid = 1;
+            monthsSorted = SortBubble(tempFileName, sortedFileName,
+                                     sizeof(monthlyDeliveryData), CompareMonthlyDeliveryData);
+        } else if (strcmp(sortType, "Merge") == 0) {
+            sortTypeValid = 1;
+            monthsSorted = SortMerge(tempFileName, sortedFileName,
+                                    sizeof(monthlyDeliveryData), CompareMonthlyDeliveryData);
+        } else {
+            printf("Error: Invalid sort type '%s'\n", sortType);
+            sortTypeValid = 0;
+            errorOccurred = 1;
+        }
+        
+        if (sortTypeValid == 1 && monthsSorted <= 0) {
+            printf("Error: Sorting failed\n");
+            errorOccurred = 1;
+        }
+        
+        if (sortTypeValid == 1 && monthsSorted > 0) {
+            time(&sortEndTime);
+            printf("Sorting completed: %d months sorted in %.0f seconds\n",
+                   monthsSorted, difftime(sortEndTime, sortStartTime));
+        }
+    }
+    
+    // Clean up temporary file
+    remove(tempFileName);
+    
+    if (errorOccurred == 0) {
+        // Generate report header
+        sprintf(reportTitle, "Report 4: Average Delivery Time Analysis and Trends Over Time");
+        GenerateReportHeader(txtFile, reportTitle);
+        
+        // Open sorted file and read data
+        sortedFile = OpenFileWithErrorCheck(sortedFileName, "rb");
+        if (sortedFile == NULL) {
+            printf("Error: Cannot open sorted delivery data file\n");
+            errorOccurred = 1;
+        }
+    }
+    
+    if (errorOccurred == 0) {
+        // Read all months and calculate statistics
+        WriteToReport(txtFile, "\n=== MONTHLY DELIVERY TIME SUMMARY ===\n");
+        WriteToReport(txtFile, "=====================================\n");
+        WriteToReport(txtFile, "%-10s %10s %12s %10s %10s\n", 
+               "Month", "Orders", "Avg Days", "Min Days", "Max Days");
+        WriteToReport(txtFile, "-----------------------------------------------------------\n");
+        
+        monthsRead = 0;
+        unsigned long totalDeliveryDays = 0;
+        
+        while (fread(&currentMonth, sizeof(monthlyDeliveryData), 1, sortedFile) == 1 && monthsRead < 100) {
+            // Display month data
+            WriteToReport(txtFile, "%04u-%02u %10lu %12.2f %10u %10u\n",
+                   currentMonth.year,
+                   currentMonth.month,
+                   currentMonth.orderCount,
+                   currentMonth.avgDeliveryDays,
+                   currentMonth.minDeliveryDays,
+                   currentMonth.maxDeliveryDays);
+            
+            // Store in array for analysis
+            allMonthsData[monthsRead] = currentMonth;
+            
+            // Accumulate totals
+            totalOrders += currentMonth.orderCount;
+            totalDeliveryDays += currentMonth.totalDeliveryDays;
+            
+            // Update global min/max
+            if (currentMonth.minDeliveryDays < globalMin) {
+                globalMin = currentMonth.minDeliveryDays;
+            }
+            if (currentMonth.maxDeliveryDays > globalMax) {
+                globalMax = currentMonth.maxDeliveryDays;
+            }
+            
+            monthsRead++;
+        }
+        
+        // Calculate overall average
+        if (totalOrders > 0) {
+            overallAvg = (double)totalDeliveryDays / (double)totalOrders;
+            overallAvg = RoundToThirdDecimal(overallAvg);
+        }
+        
+        WriteToReport(txtFile, "=====================================\n");
+        WriteToReport(txtFile, "%-10s %10lu %12.2f %10u %10u\n", 
+               "OVERALL", totalOrders, overallAvg, globalMin, globalMax);
+        WriteToReport(txtFile, "\nTotal months analyzed: %d\n", monthsRead);
+        
+        // Generate ASCII chart
+        DrawDeliveryTimeChart(txtFile, allMonthsData, monthsRead);
+        
+        // Perform trend analysis
+        AnalyzeDeliveryTrends(txtFile, allMonthsData, monthsRead);
+        
+        // Generate recommendations
+        GenerateDeliveryRecommendations(txtFile, allMonthsData, monthsRead, overallAvg);
+        
+        fclose(sortedFile);
+        
+        GenerateReportFooter(txtFile, startTime);
+        
+        if (txtFile != NULL) {
+            fclose(txtFile);
+            txtFile = NULL;
+        }
+        
+        printf("\nReport saved successfully in: %s\n", txtFileName);
+        
+        // Clean up sorted file
+        remove(sortedFileName);
+    } else {
+        // Error occurred - clean up
+        if (txtFile != NULL) {
+            fclose(txtFile);
+            remove(txtFileName);
+        }
+    }
+}//end function definition GenerateReport4DeliveryTimeAnalysis
+
 // ====================== REPORT GENERATORS ======================
 
 /*
@@ -2636,12 +3284,98 @@ void SearchInReport2(const char* sortedFileName) {
                 searchKey.customer.country[19] = '\0';
             }
             
-            // Perform binary search range
+            // Try binary search first for exact match
             searchResult = SearchBinaryRange(sortedFileName, &searchKey, 
                                             sizeof(productCustomerRecord),
-                                            CompareProductsForReport2, &startPos, &endPos);
+                                            CompareProductNameOnly, &startPos, &endPos);
             
-            if (searchResult == 1 && startPos >= 0) {
+            // If exact match not found, do sequential search for partial matches
+            if (searchResult <= 0 || startPos < 0) {
+                printf("\nExact match not found. Searching for partial matches...\n");
+                
+                sortedFile = fopen(sortedFileName, "rb");
+                if (sortedFile != NULL) {
+                    char lowerSearch[31] = {0};
+                    char lowerProduct[31] = {0};
+                    ToLowerCase(lowerSearch, searchProductName, 31);
+                    
+                    printf("\n*** FOUND (Partial Matches) ***\n");
+                    printf("Products containing '%s':\n\n", searchProductName);
+                    printf("Locations:\n");
+                    printf("--------------------------------------------------------------------------------------\n");
+                    printf("%-30s %-15s %-15s %-20s %-20s\n", "Product", "Continent", "Country", "State", "City");
+                    printf("--------------------------------------------------------------------------------------\n");
+                    
+                    int matchCount = 0;
+                    char lastShownProduct[30] = {0};
+                    char lastShownContinent[20] = {0};
+                    char lastShownCountry[20] = {0};
+                    char lastShownState[30] = {0};
+                    char lastShownCity[40] = {0};
+                    
+                    while (fread(&foundRecord, sizeof(productCustomerRecord), 1, sortedFile) == 1) {
+                        // Convert product name to lowercase for comparison
+                        ToLowerCase(lowerProduct, foundRecord.product.productName, 31);
+                        
+                        // Check if search term is substring of product name (case-insensitive)
+                        if (strstr(lowerProduct, lowerSearch) != NULL) {
+                            int matches = 1;
+                            
+                            // Apply additional filters
+                            if (searchOption >= 2 && strcmp(foundRecord.customer.continent, searchContinent) != 0) {
+                                matches = 0;
+                            }
+                            if (searchOption >= 3 && strcmp(foundRecord.customer.country, searchCountry) != 0) {
+                                matches = 0;
+                            }
+                            
+                            // Check for duplicate location
+                            if (matches == 1) {
+                                if (strcmp(lastShownProduct, foundRecord.product.productName) == 0 &&
+                                    strcmp(lastShownContinent, foundRecord.customer.continent) == 0 &&
+                                    strcmp(lastShownCountry, foundRecord.customer.country) == 0 &&
+                                    strcmp(lastShownState, foundRecord.customer.state) == 0 &&
+                                    strcmp(lastShownCity, foundRecord.customer.city) == 0) {
+                                    matches = 0;
+                                }
+                            }
+                            
+                            if (matches == 1) {
+                                printf("%-30s %-15s %-15s %-20s %-20s\n",
+                                       foundRecord.product.productName,
+                                       foundRecord.customer.continent,
+                                       foundRecord.customer.country,
+                                       foundRecord.customer.state,
+                                       foundRecord.customer.city);
+                                matchCount++;
+                                
+                                // Remember this location
+                                strncpy(lastShownProduct, foundRecord.product.productName, 29);
+                                lastShownProduct[29] = '\0';
+                                strncpy(lastShownContinent, foundRecord.customer.continent, 19);
+                                lastShownContinent[19] = '\0';
+                                strncpy(lastShownCountry, foundRecord.customer.country, 19);
+                                lastShownCountry[19] = '\0';
+                                strncpy(lastShownState, foundRecord.customer.state, 29);
+                                lastShownState[29] = '\0';
+                                strncpy(lastShownCity, foundRecord.customer.city, 39);
+                                lastShownCity[39] = '\0';
+                            }
+                        }
+                    }
+                    
+                    printf("--------------------------------------------------------------------------------------\n");
+                    if (matchCount > 0) {
+                        printf("Total matching locations: %d\n", matchCount);
+                    } else {
+                        printf("\n*** NOT FOUND ***\n");
+                        printf("No products containing '%s' were found.\n", searchProductName);
+                    }
+                    
+                    fclose(sortedFile);
+                    sortedFile = NULL;
+                }
+            } else if (searchResult == 1 && startPos >= 0) {
                 printf("\n*** FOUND ***\n");
                 
                 if (searchOption == 1) {
@@ -2658,12 +3392,16 @@ void SearchInReport2(const char* sortedFileName) {
                     fseek(sortedFile, startPos * sizeof(productCustomerRecord), SEEK_SET);
                     
                     printf("Locations:\n");
-                    printf("------------------------------------------------------\n");
+                    printf("--------------------------------------------------------------------------------------\n");
                     printf("%-30s %-15s %-15s %-20s %-20s\n", "Product", "Continent", "Country", "State", "City");
-                    printf("------------------------------------------------------\n");
+                    printf("--------------------------------------------------------------------------------------\n");
                     
                     long currentPos = startPos;
                     int matchCount = 0;
+                    char lastShownContinent[20] = {0};
+                    char lastShownCountry[20] = {0};
+                    char lastShownState[30] = {0};
+                    char lastShownCity[40] = {0};
                     
                     while (currentPos <= endPos && 
                            fread(&foundRecord, sizeof(productCustomerRecord), 1, sortedFile) == 1) {
@@ -2681,6 +3419,16 @@ void SearchInReport2(const char* sortedFileName) {
                             matches = 0;
                         }
                         
+                        // Check for duplicate location (avoid showing same location twice)
+                        if (matches == 1) {
+                            if (strcmp(lastShownContinent, foundRecord.customer.continent) == 0 &&
+                                strcmp(lastShownCountry, foundRecord.customer.country) == 0 &&
+                                strcmp(lastShownState, foundRecord.customer.state) == 0 &&
+                                strcmp(lastShownCity, foundRecord.customer.city) == 0) {
+                                matches = 0;  // Skip duplicate
+                            }
+                        }
+                        
                         if (matches == 1) {
                             printf("%-30s %-15s %-15s %-20s %-20s\n",
                                    foundRecord.product.productName,
@@ -2689,14 +3437,25 @@ void SearchInReport2(const char* sortedFileName) {
                                    foundRecord.customer.state,
                                    foundRecord.customer.city);
                             matchCount++;
+                            
+                            // Remember this location to avoid duplicates
+                            strncpy(lastShownContinent, foundRecord.customer.continent, 19);
+                            lastShownContinent[19] = '\0';
+                            strncpy(lastShownCountry, foundRecord.customer.country, 19);
+                            lastShownCountry[19] = '\0';
+                            strncpy(lastShownState, foundRecord.customer.state, 29);
+                            lastShownState[29] = '\0';
+                            strncpy(lastShownCity, foundRecord.customer.city, 39);
+                            lastShownCity[39] = '\0';
                         }
                         
                         currentPos++;
                     }
                     
-                    printf("------------------------------------------------------\n");
+                    printf("--------------------------------------------------------------------------------------\n");
                     printf("Total matching locations: %d\n", matchCount);
                     fclose(sortedFile);
+                    sortedFile = NULL;
                 }
             } else if (searchOption == 4) {
                 // Browse all records
@@ -2704,7 +3463,7 @@ void SearchInReport2(const char* sortedFileName) {
                 sortedFile = fopen(sortedFileName, "rb");
                 if (sortedFile != NULL) {
                     printf("%-30s %-15s %-15s %-20s %-20s\n", "Product", "Continent", "Country", "State", "City");
-                    printf("------------------------------------------------------\n");
+                    printf("--------------------------------------------------------------------------------------\n");
                     
                     int count = 0;
                     int maxShow = 50;
@@ -2730,13 +3489,10 @@ void SearchInReport2(const char* sortedFileName) {
                         }
                     }
                     
-                    printf("------------------------------------------------------\n");
+                    printf("--------------------------------------------------------------------------------------\n");
                     printf("Total records shown: %d\n", count);
                     fclose(sortedFile);
                 }
-            } else {
-                printf("\n*** NOT FOUND ***\n");
-                printf("No matching records found.\n");
             }
             
             printf("\nPerform another search? (y/n): ");
@@ -2838,12 +3594,126 @@ void SearchInReport5(const char* sortedFileName) {
                 searchKey.sale.productKey = searchProductKey;
             }
             
-            // Perform binary search range
+            // Try binary search first for exact match
             searchResult = SearchBinaryRange(sortedFileName, &searchKey, 
                                             sizeof(salesCustomerRecord),
-                                            CompareSalesForReport5, &startPos, &endPos);
+                                            CompareCustomerNameOnly, &startPos, &endPos);
             
-            if (searchResult == 1 && startPos >= 0) {
+            // If exact match not found, do sequential search for partial matches
+            if ((searchResult <= 0 || startPos < 0) && searchOption >= 1 && searchOption <= 4) {
+                printf("\nExact match not found. Searching for partial matches...\n");
+                
+                sortedFile = fopen(sortedFileName, "rb");
+                productsFile = OpenFileWithErrorCheck("ProductsTable.dat", "rb");
+                
+                if (sortedFile != NULL && productsFile != NULL) {
+                    char lowerSearch[40] = {0};
+                    char lowerCustomer[40] = {0};
+                    ToLowerCase(lowerSearch, searchCustomerName, 40);
+                    
+                    printf("\n*** FOUND (Partial Matches) ***\n");
+                    printf("Customers containing '%s':\n", searchCustomerName);
+                    printf("=================================================================\n");
+                    
+                    long currentOrder = -1;
+                    customerTotal = 0.0;
+                    int matchCount = 0;
+                    char lastShownCustomer[40] = {0};
+                    
+                    while (fread(&foundRecord, sizeof(salesCustomerRecord), 1, sortedFile) == 1) {
+                        // Convert customer name to lowercase
+                        ToLowerCase(lowerCustomer, foundRecord.customer.name, 40);
+                        
+                        // Check if search term is substring
+                        if (strstr(lowerCustomer, lowerSearch) != NULL) {
+                            int matches = 1;
+                            
+                            // Apply additional filters
+                            if (searchOption == 2) {
+                                if (foundRecord.sale.orderDate.monthOfYear != searchKey.sale.orderDate.monthOfYear ||
+                                    foundRecord.sale.orderDate.dayOfMonth != searchKey.sale.orderDate.dayOfMonth ||
+                                    foundRecord.sale.orderDate.yearValue != searchKey.sale.orderDate.yearValue) {
+                                    matches = 0;
+                                }
+                            }
+                            if (searchOption == 3 && foundRecord.sale.orderNumber != searchOrderNumber) {
+                                matches = 0;
+                            }
+                            if (searchOption == 4 && foundRecord.sale.productKey != searchProductKey) {
+                                matches = 0;
+                            }
+                            
+                            if (matches == 1) {
+                                // Check if new customer or new order
+                                if (strcmp(lastShownCustomer, foundRecord.customer.name) != 0) {
+                                    if (strlen(lastShownCustomer) > 0) {
+                                        printf("--------------------------------------------------------------------------------------\n");
+                                    }
+                                    strncpy(lastShownCustomer, foundRecord.customer.name, 39);
+                                    lastShownCustomer[39] = '\0';
+                                    currentOrder = -1;
+                                }
+                                
+                                if (currentOrder != foundRecord.sale.orderNumber) {
+                                    if (currentOrder != -1) {
+                                        printf("--------------------------------------------------------------------------------------\n");
+                                    }
+                                    currentOrder = foundRecord.sale.orderNumber;
+                                    printf("\nCustomer: %s\n", foundRecord.customer.name);
+                                    printf("Order #%ld - Date: %04u/%02u/%02u\n",
+                                           currentOrder,
+                                           foundRecord.sale.orderDate.yearValue,
+                                           foundRecord.sale.orderDate.monthOfYear,
+                                           foundRecord.sale.orderDate.dayOfMonth);
+                                }
+                                
+                                // Find product
+                                int productFound = 0;
+                                rewind(productsFile);
+                                while (fread(&currentProduct, sizeof(productRecord), 1, productsFile) == 1 && productFound == 0) {
+                                    if (currentProduct.productKey == foundRecord.sale.productKey) {
+                                        productFound = 1;
+                                    }
+                                }
+                                
+                                if (productFound == 1) {
+                                    // Calculate price with currency conversion
+                                    double unitPrice = currentProduct.unitPriceUSD;
+                                    const char* currency = foundRecord.sale.currencyCode;
+                                    const dateStructure* date = &foundRecord.sale.orderDate;
+                                    double priceInUSD = ConvertCurrencyToUSD(unitPrice, currency, date);
+                                    double lineValue = RoundToThirdDecimal(priceInUSD * foundRecord.sale.quantity);
+                                    
+                                    printf("  ProductKey: %u - %s\n", 
+                                           foundRecord.sale.productKey,
+                                           currentProduct.productName);
+                                    printf("    Quantity: %u  Price: $%.2f  Total: $%.2f\n",
+                                           foundRecord.sale.quantity,
+                                           priceInUSD,
+                                           lineValue);
+                                    
+                                    customerTotal += lineValue;
+                                    matchCount++;
+                                }
+                            }
+                        }
+                    }
+                    
+                    printf("=================================================================\n");
+                    if (matchCount > 0) {
+                        printf("TOTAL: $%.2f\n", customerTotal);
+                        printf("Total matching records: %d\n", matchCount);
+                    } else {
+                        printf("\n*** NOT FOUND ***\n");
+                        printf("No customers containing '%s' were found.\n", searchCustomerName);
+                    }
+                    
+                    fclose(sortedFile);
+                    fclose(productsFile);
+                    sortedFile = NULL;
+                    productsFile = NULL;
+                }
+            } else if (searchResult == 1 && startPos >= 0) {
                 printf("\n*** FOUND ***\n");
                 printf("Showing results for '%s':\n\n", searchCustomerName);
                 
@@ -2854,7 +3724,7 @@ void SearchInReport5(const char* sortedFileName) {
                 if (sortedFile != NULL && productsFile != NULL) {
                     fseek(sortedFile, startPos * sizeof(salesCustomerRecord), SEEK_SET);
                     
-                    printf("======================================================\n");
+                    printf("=================================================================\n");
                     
                     long currentPos = startPos;
                     long currentOrder = -1;
@@ -2887,7 +3757,7 @@ void SearchInReport5(const char* sortedFileName) {
                             // Check if new order
                             if (currentOrder != foundRecord.sale.orderNumber) {
                                 if (currentOrder != -1) {
-                                    printf("------------------------------------------------------\n");
+                                    printf("--------------------------------------------------------------------------------------\n");
                                 }
                                 currentOrder = foundRecord.sale.orderNumber;
                                 printf("\nOrder #%ld - Date: %04u/%02u/%02u\n",
@@ -2907,8 +3777,12 @@ void SearchInReport5(const char* sortedFileName) {
                             }
                             
                             if (productFound == 1) {
-                                double lineValue = currentProduct.unitPriceUSD * foundRecord.sale.quantity;
-                                lineValue = RoundToThirdDecimal(lineValue);
+                                // Calculate price with currency conversion
+                                double unitPrice = currentProduct.unitPriceUSD;
+                                const char* currency = foundRecord.sale.currencyCode;
+                                const dateStructure* date = &foundRecord.sale.orderDate;
+                                double priceInUSD = ConvertCurrencyToUSD(unitPrice, currency, date);
+                                double lineValue = RoundToThirdDecimal(priceInUSD * foundRecord.sale.quantity);
                                 
                                 printf("  ProductKey: %u - %s\n", 
                                        foundRecord.sale.productKey,
@@ -2926,7 +3800,7 @@ void SearchInReport5(const char* sortedFileName) {
                         currentPos++;
                     }
                     
-                    printf("======================================================\n");
+                    printf("=================================================================\n");
                     if (searchOption <= 4) {
                         printf("TOTAL: $%.2f\n", customerTotal);
                         printf("Total matching records: %d\n", matchCount);
@@ -2948,7 +3822,7 @@ void SearchInReport5(const char* sortedFileName) {
                     scanf("%d", &maxShow);
                     
                     printf("\n%-40s %-15s %-15s\n", "Customer Name", "Orders", "Total Sales");
-                    printf("------------------------------------------------------\n");
+                    printf("--------------------------------------------------------------------------------------\n");
                     
                     double currentCustomerTotal = 0.0;
                     int currentCustomerOrders = 0;
@@ -2987,8 +3861,13 @@ void SearchInReport5(const char* sortedFileName) {
                             int productFoundInLoop = 0;
                             while (fread(&currentProduct, sizeof(productRecord), 1, productsFile) == 1 && productFoundInLoop == 0) {
                                 if (currentProduct.productKey == foundRecord.sale.productKey) {
-                                    double lineValue = currentProduct.unitPriceUSD * foundRecord.sale.quantity;
-                                    currentCustomerTotal += RoundToThirdDecimal(lineValue);
+                                    // Calculate with proper currency conversion
+                                    double unitPrice = currentProduct.unitPriceUSD;
+                                    const char* currency = foundRecord.sale.currencyCode;
+                                    const dateStructure* date = &foundRecord.sale.orderDate;
+                                    double priceInUSD = ConvertCurrencyToUSD(unitPrice, currency, date);
+                                    double lineValue = RoundToThirdDecimal(priceInUSD * foundRecord.sale.quantity);
+                                    currentCustomerTotal += lineValue;
                                     productFoundInLoop = 1;  // Exit loop condition instead of break
                                 }
                             }
@@ -3001,15 +3880,12 @@ void SearchInReport5(const char* sortedFileName) {
                         customerCount++;
                     }
                     
-                    printf("------------------------------------------------------\n");
+                    printf("--------------------------------------------------------------------------------------\n");
                     printf("Total customers shown: %d\n", customerCount);
                     
                     if (productsFile != NULL) fclose(productsFile);
                     fclose(sortedFile);
                 }
-            } else {
-                printf("\n*** NOT FOUND ***\n");
-                printf("No matching records found.\n");
             }
             
             printf("\nPerform another search? (y/n): ");
@@ -3047,7 +3923,7 @@ void GenerateReport2ProductTypesAndLocations(const char* sortType) {
     char reportFileName[300] = {0};                    // Generated report file name
     char sortedFileName[300] = {0};                    // Sorted report file name
     char txtFileName[300] = {0};                       // Text report file name
-    char currentProductName[31] = {0};                 // Current product name for display
+    char currentProductName[50] = {0};                 // Current product name for display (increased size)
     char reportTitle[100] = {0};                       // Report title
     int recordsProcessed = 0;                          // Number of records processed
     int recordsSorted = 0;                             // Number of records sorted
@@ -3230,29 +4106,54 @@ void GenerateReport2ProductTypesAndLocations(const char* sortType) {
                 actualLimit = maxDisplayRecords;
             }
             
+            // For descending order, we need to read records in reverse
+            // Store the direction and adjust reading logic
+            int readDirection = ascending;  // 1 for forward, 0 for backward
+            
             // Determine starting position based on sort order
             if (ascending == 1) {
                 startPosition = 0;  // Start from beginning for ascending
             } else {
-                startPosition = totalRecordsInFile - actualLimit;  // Start from end for descending
-                if (startPosition < 0) startPosition = 0;
+                startPosition = totalRecordsInFile - 1;  // Start from last record for descending
             }
-            
-            fseek(sortedFile, startPosition * sizeof(productCustomerRecord), SEEK_SET);
-            
-            while (fread(&displayRecord, sizeof(productCustomerRecord), 1, sortedFile) == 1) {
+            while (displayCount < actualLimit) {
+                long currentPosition = 0;
+                
+                // Calculate position based on read direction
+                if (readDirection == 1) {
+                    // Ascending: read forward from startPosition
+                    currentPosition = startPosition + displayCount;
+                } else {
+                    // Descending: read backward from startPosition
+                    currentPosition = startPosition - displayCount;
+                }
+                
+                // Check if position is valid
+                if (currentPosition < 0 || currentPosition >= totalRecordsInFile) {
+                    break;  // Exit if we've gone beyond file bounds - EXCEPTION: this is the only valid use of break for boundary checking
+                }
+                
+                // Seek to calculated position and read record
+                fseek(sortedFile, currentPosition * sizeof(productCustomerRecord), SEEK_SET);
+                if (fread(&displayRecord, sizeof(productCustomerRecord), 1, sortedFile) != 1) {
+                    break;  // Exit if read fails - EXCEPTION: this is the only valid use of break for I/O error
+                }
+                
                 recordCount++;
                 
-                // Only display up to actualLimit
-                if (displayCount < actualLimit) {
-                    // Check if this is a new product
-                    if (strcmp(currentProductName, displayRecord.product.productName) != 0) {
-                        if (strlen(currentProductName) > 0) {
-                            WriteToReport(txtFile, "\n");  // Add blank line between products
-                        }
-                        strncpy(currentProductName, displayRecord.product.productName, 30);
-                        currentProductName[30] = '\0';
-                        WriteToReport(txtFile, "ProductName: %s\n", displayRecord.product.productName);
+                // Check if this is a new product
+                if (strcmp(currentProductName, displayRecord.product.productName) != 0) {
+                    if (strlen(currentProductName) > 0) {
+                        WriteToReport(txtFile, "\n");  // Add blank line between products
+                    }
+                    // Copy full product name safely
+                    strncpy(currentProductName, displayRecord.product.productName, 29);
+                    currentProductName[29] = '\0';
+                    // Display the full product name from the record itself
+                    char fullProductName[31] = {0};
+                    strncpy(fullProductName, displayRecord.product.productName, 30);
+                    fullProductName[30] = '\0';
+                    WriteToReport(txtFile, "ProductName: %s\n", fullProductName);
                         
                         // Reset duplicate tracking for new product
                         previousContinent[0] = '\0';
@@ -3290,9 +4191,8 @@ void GenerateReport2ProductTypesAndLocations(const char* sortType) {
                         previousCity[39] = '\0';
                         locationCount++;
                     }
-                    
-                    displayCount++;
-                }
+                
+                displayCount++;
             }
             
             fclose(sortedFile);
@@ -3582,17 +4482,36 @@ void GenerateReport5CustomerSalesListing(const char* sortType) {
                 actualLimit = maxDisplayRecords;
             }
             
+            // For descending order, we need to read records in reverse
+            int readDirection = ascending;  // 1 for forward, 0 for backward
+            
             // Determine starting position based on sort order
             if (ascending == 1) {
                 startPosition = 0;  // Start from beginning for ascending
             } else {
-                startPosition = totalRecordsInFile - actualLimit;  // Start from end for descending
-                if (startPosition < 0) startPosition = 0;
+                startPosition = totalRecordsInFile - 1;  // Start from last record for descending
             }
             
-            fseek(sortedFile, startPosition * sizeof(salesCustomerRecord), SEEK_SET);
-            
-            while (fread(&displayRecord, sizeof(salesCustomerRecord), 1, sortedFile) == 1 && displayedRecords < actualLimit) {
+            while (displayedRecords < actualLimit) {
+                long currentPosition = 0;
+                
+                // Calculate position based on read direction
+                if (readDirection == 1) {
+                    currentPosition = startPosition + displayedRecords;
+                } else {
+                    currentPosition = startPosition - displayedRecords;
+                }
+                
+                // Check if position is valid
+                if (currentPosition < 0 || currentPosition >= totalRecordsInFile) {
+                    break;  // Exit if we've gone beyond file bounds - EXCEPTION: boundary checking
+                }
+                
+                // Seek to calculated position and read record
+                fseek(sortedFile, currentPosition * sizeof(salesCustomerRecord), SEEK_SET);
+                if (fread(&displayRecord, sizeof(salesCustomerRecord), 1, sortedFile) != 1) {
+                    break;  // Exit if read fails - EXCEPTION: I/O error
+                }
                 recordCount++;
                 int productFound = 0;
                 int continueProductSearch = 1;
@@ -3647,11 +4566,23 @@ void GenerateReport5CustomerSalesListing(const char* sortType) {
                 
                 // Calculate line value
                 if (productFound == 1) {
-                    lineValue = currentProduct.unitPriceUSD * displayRecord.sale.quantity;
-                    lineValue = RoundToThirdDecimal(lineValue);
+                    // Get unit price from product
+                    double unitPrice = currentProduct.unitPriceUSD;
+                    
+                    // Get currency code from sale transaction
+                    const char* currency = displayRecord.sale.currencyCode;
+                    
+                    // Get transaction date
+                    const dateStructure* date = &displayRecord.sale.orderDate;
+                    
+                    // Convert to USD using exchange rate for the transaction date
+                    double priceInUSD = ConvertCurrencyToUSD(unitPrice, currency, date);
+                    
+                    // Calculate line value with quantity and apply rounding
+                    lineValue = RoundToThirdDecimal(priceInUSD * displayRecord.sale.quantity);
                     
                     // Print line item
-                    WriteToReport(txtFile, "%5u%18s%-50s%8u%15.2f\n",
+                    WriteToReport(txtFile, "%11u%18s%-51s%8u%15.2f\n",
                            displayRecord.sale.productKey,
                            "",
                            currentProduct.productName,
@@ -3663,7 +4594,7 @@ void GenerateReport5CustomerSalesListing(const char* sortType) {
                     customerTotal += lineValue;
                     grandTotal += lineValue;
                 } else {
-                    WriteToReport(txtFile, "%5u%18s%-50s%8u%15s\n",
+                    WriteToReport(txtFile, "%11u%18s%-51s%8u%15s\n",
                            displayRecord.sale.productKey,
                            "",
                            "[Product Not Found]",
@@ -5410,8 +6341,36 @@ void ExecuteMainProgramLoop() {
         }
         else if (mainOption == 4)  // Report: Average delivery time analysis
         {
-            printf("Report 4 not yet implemented. Coming soon!\n");
-            // TODO: Implement delivery time analysis report
+            if (subOption == 1) {
+                // Option 4.1: Use Bubble Sort
+                GenerateReport4DeliveryTimeAnalysis("Bubble");
+            } else if (subOption == 2) {
+                // Option 4.2: Use Merge Sort
+                GenerateReport4DeliveryTimeAnalysis("Merge");
+            } else if (subOption == 0) {
+                // Option 4: Ask user to choose sorting method
+                int sortChoice = 0;
+                printf("\nSelect sorting algorithm:\n");
+                printf("1. Bubble Sort\n");
+                printf("2. Merge Sort\n");
+                printf("Your choice: ");
+                
+                if (scanf("%d", &sortChoice) == 1) {
+                    if (sortChoice == 1) {
+                        GenerateReport4DeliveryTimeAnalysis("Bubble");
+                    } else if (sortChoice == 2) {
+                        GenerateReport4DeliveryTimeAnalysis("Merge");
+                    } else {
+                        printf("Invalid sort choice. Please choose 1 or 2.\n");
+                    }
+                    while (getchar() != '\n'); // Clean input buffer
+                } else {
+                    printf("Error: Invalid input\n");
+                    while (getchar() != '\n'); // Clean input buffer
+                }
+            } else {
+                printf("Invalid sub-option for Report 4. Use 4.1 or 4.2\n");
+            }
             system("pause");
         }
         else if (mainOption == 5)  // Report: Customer sales listing

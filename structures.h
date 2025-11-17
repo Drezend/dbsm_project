@@ -232,6 +232,29 @@ typedef struct {
 } regionSeasonalData;
 
 /*
+ * Structure: monthlyDeliveryData
+ * Purpose: Stores delivery time statistics for each month
+ * Fields: year - year of the data
+ *         month - month (1-12)
+ *         orderCount - number of orders in this month
+ *         totalDeliveryDays - sum of all delivery times
+ *         avgDeliveryDays - average delivery time in days
+ *         minDeliveryDays - minimum delivery time
+ *         maxDeliveryDays - maximum delivery time
+ * Size: ~24 bytes
+ * Note: Used for Report 4 - Delivery time analysis
+ */
+typedef struct {
+    unsigned short year;                   // Year (e.g., 2016)
+    unsigned char month;                   // Month (1-12)
+    unsigned long orderCount;              // Number of orders
+    unsigned long totalDeliveryDays;       // Sum of all delivery times
+    double avgDeliveryDays;                // Average delivery time
+    unsigned short minDeliveryDays;        // Minimum delivery days
+    unsigned short maxDeliveryDays;        // Maximum delivery days
+} monthlyDeliveryData;
+
+/*
  * Structure: productCustomerRecord
  * Purpose: Combined record for Report 2 - Products and customer locations
  * Fields: product - product information
